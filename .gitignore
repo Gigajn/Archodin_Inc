@@ -1,0 +1,36 @@
+# Rust build artifacts
+target/
+
+# Python (frozen oracle, removed in ticket 17)
+__pycache__/
+*.pyc
+backend/.venv/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Agent runtime state (not project content)
+.omo/
+
+# Vendored skill packs: pinned by skills-lock.json, content not committed
+.agents/
+.claude/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+
+# Local database + logs
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# NOTE: Cargo.lock is intentionally COMMITTED. This is a binary application;
+# a pinned lockfile is what makes a 24/7 deployment reproducible.

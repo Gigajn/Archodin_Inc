@@ -1,0 +1,16 @@
+# Gitleaks configuration for the AAHC repo.
+#
+# `.env.example` files are templates: they list variable NAMES with empty values
+# (e.g. `GROQ_API_KEY_1=`), which trips the generic-api-key rule. They never hold
+# real credentials — the real `.env` is git-ignored and must stay that way.
+#
+# This allowlist is deliberately narrow: only files ending in `.env.example`.
+# Everything else stays under the default rule set, so a real key committed by
+# accident is still caught.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Example env files contain empty placeholders, never real values."
+paths = ['''\.env\.example$''']
