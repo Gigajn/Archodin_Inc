@@ -1,0 +1,5 @@
+[toolchain]
+# Pinned so a 24/7 deployment is reproducible on this machine and in CI.
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "default"
