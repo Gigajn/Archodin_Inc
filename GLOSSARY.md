@@ -8,6 +8,10 @@ Archodin is a Rust library for building multi-agent systems on top of langchain-
 One LLM with its own instructions, tools and memory, which keeps calling tools until it produces an answer.
 _Avoid_: Bot, assistant, worker
 
+**Role**:
+A job description from which Agents are created: instructions, Skills, Tools, a default model and its fallbacks; one Role can have many Agents.
+_Avoid_: Position, persona, template
+
 **Tool**:
 A capability an Agent can call by name with structured input, returning a result the Agent reads.
 _Avoid_: Function, plugin, action
@@ -16,14 +20,26 @@ _Avoid_: Function, plugin, action
 A source of LLM completions that an Agent talks to; an OpenAI-compatible Provider is one reached by base URL, API key and model name (9router, OpenRouter, Groq, LM Studio, vLLM).
 _Avoid_: Backend, vendor, model
 
+**Model chain**:
+The ordered list of Provider and model pairs an Agent uses: the first one normally, the next ones when the one before fails or hits a limit. Set per Role, overridable per Agent.
+_Avoid_: Fallback list, routing table, combo
+
+**Budget**:
+The most tokens or money an Agent or a Job may spend before it stops and waits for a person's decision.
+_Avoid_: Quota, cap, limit
+
 ## Orchestration
+
+**Job**:
+A piece of work a person submits from the console, which a Supervisor breaks down and runs as a Graph.
+_Avoid_: Task, request, ticket
 
 **Graph**:
 The structure a multi-agent run follows: Nodes joined by Edges, all reading and updating one State.
 _Avoid_: Workflow, pipeline, flow
 
 **Node**:
-One step in a Graph, either an Agent or a plain function.
+One step in a Graph: an Agent, a plain function, or a whole other Graph (which is how departments nest under a Supervisor).
 _Avoid_: Step, stage, task
 
 **Edge**:
@@ -78,7 +94,7 @@ _Avoid_: Habit, guideline, rule
 
 **Scout**:
 An Agent that runs before work is assigned, checks which Skills the task needs, and finds missing ones so a person can approve them before they are installed.
-_Avoid_: Skill finder, preparer, recruiter
+_Avoid_: Skill finder, preparer
 
 **Inspector**:
 An Agent that checks a Skill found by the Scout, or written by an Agent, for anything unsafe before it reaches a person for approval.
