@@ -383,3 +383,5 @@ mod handoff;
 pub use handoff::{Briefing, Handoff, Turn, HISTORY_TOOL};
 mod skills;
 pub use skills::{FlowRun, PendingSkill, Skill, SkillError, SkillKind, SkillLibrary};
+mod learning;
+pub use learning::{Akasha, LearnError, Learned, Learner, MIN_TOOL_CALLS};
