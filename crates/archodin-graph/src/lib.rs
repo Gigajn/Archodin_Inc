@@ -390,3 +390,8 @@ mod learning;
 pub use learning::{Akasha, LearnError, Learned, Learner, MIN_TOOL_CALLS};
 mod vigil;
 pub use vigil::{RejectedBy, SkillSource, Verdict, Vigil};
+mod sandbox;
+pub use sandbox::{
+    run_skill_script, ContainerSandbox, Limit, Sandbox, SandboxError, SandboxInput, SandboxOutput,
+    SandboxPolicy, SandboxTool, ScriptedSandbox, SkillScriptError,
+};
