@@ -42,12 +42,16 @@ _Avoid_: Manager, orchestrator, coordinator
 An Agent called when two or more Nodes in a run produce competing values for the same part of the State, which decides the final value.
 _Avoid_: Judge, reviewer, merger
 
+**Panel**:
+Several Agents doing the same task in parallel on purpose, after which the Arbiter picks or combines the best result.
+_Avoid_: Ensemble, redundancy, voting
+
 **Handoff**:
 One Agent passing control of the conversation to another Agent, together with a Briefing rather than the raw history.
 _Avoid_: Transfer, delegation, routing
 
 **Briefing**:
-The condensed, structured context an Agent receives on a Handoff: small enough to spare its context window, complete enough to keep the essentials of the task.
+The condensed context an Agent receives on a Handoff, always in the same sections: Goal, Done so far, Decisions, Open questions, Related material.
 _Avoid_: Summary, context dump
 
 **Step limit**:
@@ -67,3 +71,11 @@ _Avoid_: Prompt, recipe, playbook
 **Scout**:
 An Agent that runs before work is assigned, checks which Skills the task needs, and finds missing ones so a person can approve them before they are installed.
 _Avoid_: Skill finder, preparer, recruiter
+
+**Inspector**:
+An Agent that checks a Skill found by the Scout, or written by an Agent, for anything unsafe before it reaches a person for approval.
+_Avoid_: Auditor, scanner, guard
+
+**Curator**:
+An Agent that keeps the Skill library: it holds Skills waiting for approval, installs approved ones, and keeps their versions for rollback.
+_Avoid_: Librarian, skill manager, registry
