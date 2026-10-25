@@ -168,6 +168,7 @@ async fn parallel_nodes_stream_started_then_finished_events_in_declaration_order
             JobEvent::NodeFinished { node } => format!("-{node}"),
             JobEvent::JobFinished { .. } => "end".into(),
             JobEvent::Conflict { .. } => "conflict".into(),
+            _ => "other".into(),
         })
         .collect();
     assert_eq!(names, ["start", "+a", "+b", "-a", "-b", "end"]);
