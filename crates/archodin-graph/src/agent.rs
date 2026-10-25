@@ -177,6 +177,16 @@ impl AgentNode {
 
     /// Answers `request`, calling Tools as the model asks.
     pub async fn answer(&self, request: &str) -> Result<String, AgentError> {
+        self.answer_with_usage(request).await.map(|(a, _)| a)
+    }
+
+    /// Like [`AgentNode::answer`], also returning the tokens all model round trips
+    /// used (its `cost` is 0 until priced with [`crate::Pricing::price`]).
+    pub async fn answer_with_usage(
+        &self,
+        request: &str,
+    ) -> Result<(String, crate::Usage), AgentError> {
+        let mut usage = crate::Usage::default();
         let llm = self.provider.llm(&self.tools);
         let mut messages = vec![
             Message::new_system_message(&self.instructions),
@@ -187,8 +197,12 @@ impl AgentNode {
                 .generate(&messages)
                 .await
                 .map_err(|e| AgentError::Provider(e.to_string()))?;
+            if let Some(t) = &result.tokens {
+                usage.prompt_tokens += u64::from(t.prompt_tokens);
+                usage.completion_tokens += u64::from(t.completion_tokens);
+            }
             if result.tool_calls.is_empty() {
-                return Ok(result.generation);
+                return Ok((result.generation, usage));
             }
             messages.push(Message::new_ai_message_with_tool_calls(
                 &result.generation,

@@ -15,6 +15,10 @@ pub use durable::{
     InMemoryCheckpointStore, JobOutcome, ScriptedApprover,
 };
 
+mod budget;
+
+pub use budget::{Budget, BudgetApprover, BudgetScope, Pricing, Usage, UsageMeter};
+
 mod parallel;
 
 pub use parallel::{Fanout, FanoutBuilder, FanoutError, MergeRules};
