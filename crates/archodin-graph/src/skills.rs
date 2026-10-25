@@ -138,6 +138,11 @@ impl Skill {
         &self.uses
     }
 
+    /// The Skill's scripts by name, with their source.
+    pub fn scripts(&self) -> &BTreeMap<String, String> {
+        &self.scripts
+    }
+
     /// The instructions.
     pub fn body(&self) -> &str {
         &self.body
@@ -151,6 +156,10 @@ pub struct PendingSkill {
     pub role: String,
     /// The Skill.
     pub skill: Skill,
+    /// Vigil's summary of the Skill, when Vigil inspected it.
+    pub summary: Option<String>,
+    /// Whether the Skill came from an unverified source.
+    pub unverified: bool,
 }
 
 struct Version {
@@ -198,9 +207,23 @@ impl SkillLibrary {
 
     /// Holds a new or changed Skill for `role` until a person approves it.
     pub fn propose(&self, role: &str, skill: Skill) {
+        self.propose_inspected(role, skill, None, false);
+    }
+
+    /// Holds a Skill Vigil has inspected, with Vigil's `summary` attached, until a
+    /// person approves it; `unverified` marks a Skill from an untrusted source.
+    pub fn propose_inspected(
+        &self,
+        role: &str,
+        skill: Skill,
+        summary: Option<String>,
+        unverified: bool,
+    ) {
         lock(&self.inner).pending.push(PendingSkill {
             role: role.into(),
             skill,
+            summary,
+            unverified,
         });
     }
 
