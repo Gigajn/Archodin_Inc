@@ -38,6 +38,9 @@ pub use roster::{branch_name, Agent, Role, Roster, RosterError};
 mod agent;
 pub use agent::{AgentError, AgentNode, AgentTool, Provider, TypedTool};
 
+mod strategos;
+pub use strategos::{Assignment, Piece, Strategos, StrategosError, StrategosEvent};
+
 type NodeFn<S> = Arc<dyn Fn(S) -> BoxFuture<'static, S> + Send + Sync>;
 type RouterFn<S> = Arc<dyn Fn(&S) -> &'static str + Send + Sync>;
 
