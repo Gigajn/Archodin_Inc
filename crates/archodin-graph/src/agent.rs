@@ -203,6 +203,35 @@ impl AgentTool {
         }
     }
 
+    /// Builds a Tool whose schema is only known at run time (for example one an
+    /// MCP server lists); `call` receives the arguments as a JSON string.
+    pub fn dynamic<F>(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: Value,
+        call: F,
+    ) -> Self
+    where
+        F: Fn(String) -> BoxFuture<'static, Result<String, String>> + Send + Sync + 'static,
+    {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+            runner: Arc::new(call),
+        }
+    }
+
+    /// Calls the Tool with `arguments` (a JSON string), as an Agent would.
+    pub async fn call(&self, arguments: &str) -> Result<String, String> {
+        (self.runner)(arguments.to_string()).await
+    }
+
+    /// What the Tool does and when to use it.
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
     /// The name the model calls the Tool by.
     pub fn name(&self) -> &str {
         &self.name

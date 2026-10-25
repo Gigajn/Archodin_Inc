@@ -395,3 +395,5 @@ pub use sandbox::{
     run_skill_script, ContainerSandbox, Limit, Sandbox, SandboxError, SandboxInput, SandboxOutput,
     SandboxPolicy, SandboxTool, ScriptedSandbox, SkillScriptError,
 };
+mod mcp;
+pub use mcp::{McpClient, McpError, McpLibrary, McpServer, PendingMcpServer};
