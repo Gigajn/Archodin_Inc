@@ -7,6 +7,13 @@
 //! This first slice supports a single plain-function Node; Edges, the Step limit
 //! and Checkpoints arrive with later tickets.
 
+mod durable;
+
+pub use durable::{
+    ApprovalDecision, ApprovalRequest, Approver, Checkpoint, CheckpointStore,
+    InMemoryCheckpointStore, JobOutcome, ScriptedApprover,
+};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -37,12 +44,21 @@ pub enum JobEvent<S> {
     NodeFinished { node: String },
     /// The Job ended; `state` is the final State.
     JobFinished { state: S },
+    /// A durable Job paused: a step is waiting for a person's approval.
+    JobPaused {
+        node: String,
+        prompt: String,
+        state: S,
+    },
+    /// A durable Job stopped because a person rejected a step.
+    JobRejected { node: String, state: S },
 }
 
 /// Builds a [`Graph`].
 pub struct GraphBuilder<S> {
     nodes: HashMap<String, NodeFn<S>>,
     entry: Option<String>,
+    approvals: HashMap<String, durable::PromptFn<S>>,
 }
 
 impl<S: Send + 'static> GraphBuilder<S> {
@@ -72,6 +88,7 @@ impl<S: Send + 'static> GraphBuilder<S> {
         Ok(Graph {
             nodes: self.nodes,
             entry,
+            approvals: self.approvals,
         })
     }
 }
@@ -80,6 +97,7 @@ impl<S: Send + 'static> GraphBuilder<S> {
 pub struct Graph<S> {
     nodes: HashMap<String, NodeFn<S>>,
     entry: String,
+    approvals: HashMap<String, durable::PromptFn<S>>,
 }
 
 enum Phase<S> {
@@ -96,6 +114,7 @@ impl<S: Clone + Send + 'static> Graph<S> {
         GraphBuilder {
             nodes: HashMap::new(),
             entry: None,
+            approvals: HashMap::new(),
         }
     }
 
