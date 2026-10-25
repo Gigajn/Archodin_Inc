@@ -355,3 +355,6 @@ impl<S: Clone + Send + 'static> Graph<S> {
         unreachable!("a Job stream always ends with JobFinished or StepLimitReached")
     }
 }
+
+mod skills;
+pub use skills::{FlowRun, PendingSkill, Skill, SkillError, SkillKind, SkillLibrary};
