@@ -14,6 +14,9 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 
+mod agent;
+pub use agent::{AgentError, AgentNode, AgentTool, Provider, TypedTool};
+
 type NodeFn<S> = Arc<dyn Fn(S) -> BoxFuture<'static, S> + Send + Sync>;
 type RouterFn<S> = Arc<dyn Fn(&S) -> &'static str + Send + Sync>;
 
