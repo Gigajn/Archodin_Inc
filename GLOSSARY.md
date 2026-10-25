@@ -5,7 +5,7 @@ Archodin is a Rust library for building multi-agent systems on top of langchain-
 ## Company
 
 **Agent**:
-A long-lived AI employee: one LLM with instructions, Tools and memory, created from a Role, which keeps calling Tools until it produces an answer and carries what it learns from one Job to the next.
+A long-lived AI employee with its own name, always shown next to its Role: one LLM with instructions, Tools and memory, which keeps calling Tools until it produces an answer and carries what it learns from one Job to the next. Its git branches start with its name (`<agent-name>/<topic>`).
 _Avoid_: Bot, assistant, worker, employee
 
 **Tool**:
@@ -29,7 +29,7 @@ The Agent that grows the company: it looks for new opportunities, such as an ope
 _Avoid_: Expander, scout, business developer
 
 **Charter**:
-An Explorador's proposal for a new Department: its goal, where its work comes from, its Roles and its Budget; nothing is created until a person approves it.
+A proposal for a new Department: its goal, where its work comes from (for example a GitHub repository a person links in the Agora), its Roles and its Budget; nothing is created until a person approves it.
 _Avoid_: Proposal, plan, pitch
 
 **Job**:
