@@ -373,5 +373,19 @@ hanya bahasanya yang berubah. Pohon Python Fase 1 **dibekukan sebagai oracle par
 
 ### Rencana tiket
 
-17 tiket tracer-bullet tersimpan di `.scratch/aahc/issues/` (urut dependensi, satu berkas per tiket).
+20 tiket tracer-bullet tersimpan di `.scratch/aahc/issues/` (satu berkas per tiket).
 Kurva expand→contract: pohon Python hidup sampai tiket 17.
+
+### Audit rencana tiket (25 Oktober 2026)
+
+Audit terhadap SRS menemukan tiga kebutuhan yang belum bertiket dan beberapa gerbang blokir yang keliru. Perubahan yang diterapkan:
+
+- **Tiket baru 18** — engine eksekusi agen inti (state machine per `execution_mode`). Tanpa ini, tiket 07/08/09/13/14/15 mengandaikan "pekerjaan nyata" yang tidak pernah dibangun.
+- **Tiket baru 19** — sandbox dev terisolasi + siklus self-debug (FR-DEV-01/02), termasuk batas 5 iterasi dan eskalasi ke manusia.
+- **Tiket baru 20** — paket deployment 24/7 (compose/systemd, `restart: always`, Redis/ChromaDB/Ollama) yang menjadi bukti nyata NFR-AVL-01; tiket 16 kini bergantung padanya.
+- **Gerbang diperbaiki** — 07 bergantung pada 18 (kill-switch butuh pekerjaan nyata); 13/14/15 tidak lagi dipaksa menunggu REST 07 karena irisannya diuji sebagai pipeline/layanan dengan harness, integrasi kantor lewat 18; 17 kini digerbangi seluruh tiket paritas + 18/19/20.
+- **Oracle paritas** — tabel aditif baru (metrik ML, pesan CS, draf marketing) dinyatakan di luar perbandingan skema Fase 1; paritas berarti "nol perbedaan pada skema Fase 1", bukan "tidak boleh ada tabel baru".
+- **Batas batal** — tanggal mulai 5 hari kerja dicatat di tiket 04 saat status berubah; tanpa catatan itu batas tidak dapat dieksekusi.
+- **Penyimpangan penomoran** — 18–20 ditambahkan setelah rencana awal; relasi blokir mengikuti daftar `Blocked by`, bukan urutan nomor.
+
+Kebutuhan skill agen yang belum tertutup paket skill di repo: konvensi Rust (tipe error, higiene tokio untuk proses 24/7), operasi deployment (compose/systemd, pengukuran RSS/CPU), dan daftar periksa keamanan sandbox. Ketiganya lebih tepat ditulis sebagai skill proyek saat tiket terkait dikerjakan, bukan dipasang di muka.

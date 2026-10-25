@@ -2,7 +2,9 @@
 
 **What to build:** Antarmuka kendali kantor: menghasilkan rancangan divisi dari deskripsi bisnis, menyimpan dan mengaktifkan divisi, mengubah konfigurasi karyawan saat kantor sedang berjalan, dan menghentikan seluruh eksekusi dalam keadaan darurat.
 
-**Blocked by:** 02, 05
+**Blocked by:** 05, 18
+
+Catatan: aktivasi divisi dan kill-switch hanya dapat dibuktikan terhadap pekerjaan nyata, karena itu engine (18) menjadi gerbang; 18 mengimplisitkan 02 dan 04.
 
 **Status:** ready-for-agent
 

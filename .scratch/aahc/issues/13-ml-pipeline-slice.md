@@ -2,7 +2,9 @@
 
 **What to build:** Divisi ML bisa menjalankan siklus penuh untuk model kecil: mengambil dataset, menyiapkannya, melatih, dan melaporkan mutu model ke database sehingga terlihat di dashboard.
 
-**Blocked by:** 02, 07
+**Blocked by:** 02
+
+Catatan: irisan ini diuji sebagai pipeline dengan harness; integrasi ke kantor (menjalankan divisi lewat engine) menyusul di tiket 18. Tabel metrik baru bersifat aditif — oracle paritas tiket 17 membandingkan skema Fase 1 saja.
 
 **Status:** ready-for-agent
 

@@ -2,7 +2,7 @@
 
 **What to build:** Kantor yang benar-benar tahan dinyalakan berbulan-bulan: hidup kembali setelah crash atau listrik mati, dapat dihentikan dengan aman, dan — yang paling penting — klaim penghematan sumber daya diukur, bukan diklaim.
 
-**Blocked by:** 08
+**Blocked by:** 08, 20
 
 **Status:** ready-for-agent
 
@@ -14,5 +14,6 @@ Data pembanding dari sisi Rust (diukur saat tiket 01): binary rilis yang hanya m
 - [ ] Penghentian normal menutup koneksi database, stream, dan child process tanpa sisa proses yatim.
 - [ ] Kill-switch diuji ulang pada kantor yang sedang bekerja: seluruh pekerjaan berhenti dan keadaan tercatat.
 - [ ] RSS dan CPU stack Rust diukur pada beban yang sama dengan baseline Python, dan hasilnya **dipublikasikan apa adanya** — termasuk bila penghematannya kecil atau tidak ada.
+- [ ] Artefak deployment dari tiket 20 terbukti memulihkan kantor setelah reboot, dan pengukuran RSS/CPU dilakukan pada artefak itu — bukan pada binary ad-hoc.
 - [ ] Jejak audit tersedia untuk pertanyaan "siapa/kapan mematikan kantor".
 - [ ] Log terstruktur dan dapat diputar; berkas log tidak tumbuh tanpa batas.

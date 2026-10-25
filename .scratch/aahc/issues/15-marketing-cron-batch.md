@@ -2,7 +2,9 @@
 
 **What to build:** Divisi pemasaran bekerja terjadwal tanpa disuruh: riset tren, penyusunan materi promosi, dan penyiapan kandidat produk afiliasi — semuanya berhenti di draf yang menunggu persetujuan manusia sebelum tayang.
 
-**Blocked by:** 06, 07
+**Blocked by:** 06
+
+Catatan: scheduler diuji sebagai irisan; integrasi ke engine (`CRON_BATCH`) lewat tiket 18. Tabel draf baru bersifat aditif terhadap oracle paritas.
 
 **Status:** ready-for-agent
 

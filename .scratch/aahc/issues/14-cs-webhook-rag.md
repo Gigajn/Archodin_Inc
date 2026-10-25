@@ -2,7 +2,9 @@
 
 **What to build:** Layanan pelanggan yang menjawab pesan masuk berdasarkan pengetahuan perusahaan sendiri: katalog produk, harga, dan SOP balasan disimpan sebagai memori vektor, dan jawaban dibuat dari dokumen yang benar-benar ditemukan.
 
-**Blocked by:** 07
+**Blocked by:** 02
+
+Catatan: webhook diuji sebagai irisan layanan; integrasi ke engine (`WEBHOOK_CS`) lewat tiket 18. Tabel pesan/pengetahuan baru bersifat aditif terhadap oracle paritas.
 
 **Status:** ready-for-agent
 

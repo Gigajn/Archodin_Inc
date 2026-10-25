@@ -8,6 +8,8 @@
 
 Catatan lingkup: kanvas browser tetap Phaser.js (JavaScript) sesuai SRS; keputusan ini disengaja dan tidak dibatalkan oleh rewrite Rust.
 
+Catatan desain: skill `ui-ux-pro-max` di `.agents/skills/ui-ux-pro-max` menjadi sumber kecerdasan desain (palet, tipografi, pola dashboard) sebelum UI digambar; pilihan yang dipakai dicatat singkat di tiket ini.
+
 - [ ] Denah per lantai dan meja digambar dari data API (bukan aset hardcode), termasuk beda tinggi/lebar ruangan saat denah melebar.
 - [ ] Karakter berubah animasi saat menerima kejadian: diam, bekerja, berjalan menyerahkan tugas, dan peringatan error/limit.
 - [ ] Gerak `HANDOFF` berjalan dari meja asal ke meja tujuan sesuai koordinat yang dikirim.

@@ -6,6 +6,8 @@
 
 **Status:** ready-for-agent
 
+**Mulai hitungan batas batal 5 hari kerja:** ____ (tulis tanggal UTC saat status berubah dari `ready-for-agent`; batas = 5 hari kerja sejak itu, dieksekusi di tiket 17).
+
 - [ ] Empat klaster (CODE, FAST, REASONING, VISION) memilih lane sesuai prioritas urutan, dan lane yang masih dalam masa cooldown dilewati.
 - [ ] HTTP 429/503 memindahkan permintaan ke lane berikutnya **tanpa jeda tidur** apa pun; cooldown dihitung dari `Retry-After` (detik maupun format tanggal HTTP); 429 tanpa header memakai default 60 detik, 503 memakai 30 detik.
 - [ ] 401/403 mengunci lane 30 menit; 500 dan kegagalan transport **tidak** mengunci lane apa pun.
