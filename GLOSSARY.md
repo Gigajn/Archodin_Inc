@@ -1,6 +1,6 @@
 # Archodin
 
-Archodin is a Rust library for building multi-agent systems on top of langchain-rust.
+Archodin is a Rust library for building multi-agent systems on top of langchain-rust, meant as the base of a company whose whole staff are AI Agents, run from a web console.
 
 ## Agents
 
@@ -35,7 +35,7 @@ The single typed value shared by every Node in a Graph run, read and updated by 
 _Avoid_: Context, memory, blackboard
 
 **Supervisor**:
-An Agent whose job is to split a task and pass the pieces to other Agents, built from Nodes and Edges.
+An Agent whose job is to split a task and pass the pieces to other Agents, each piece started as a Flow, built from Nodes and Edges.
 _Avoid_: Manager, orchestrator, coordinator
 
 **Arbiter**:
@@ -67,6 +67,14 @@ _Avoid_: Snapshot, savepoint
 **Skill**:
 Procedural knowledge an Agent writes down from experience and refines with use, then reuses on later tasks.
 _Avoid_: Prompt, recipe, playbook
+
+**Flow**:
+A Skill that is started on purpose, by a person or a Supervisor, and runs a fixed sequence of steps; a Flow may use Disciplines but never another Flow.
+_Avoid_: Command, workflow, procedure
+
+**Discipline**:
+A Skill an Agent reaches for by itself whenever the task fits, holding a reusable way of working.
+_Avoid_: Habit, guideline, rule
 
 **Scout**:
 An Agent that runs before work is assigned, checks which Skills the task needs, and finds missing ones so a person can approve them before they are installed.
