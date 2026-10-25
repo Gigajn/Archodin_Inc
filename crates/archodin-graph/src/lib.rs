@@ -7,6 +7,10 @@
 //! This first slice supports a single plain-function Node; Edges, the Step limit
 //! and Checkpoints arrive with later tickets.
 
+mod parallel;
+
+pub use parallel::{Fanout, FanoutBuilder, FanoutError, MergeRules};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -35,6 +39,8 @@ pub enum JobEvent<S> {
     NodeStarted { node: String },
     /// A Node finished and its update was applied to the State.
     NodeFinished { node: String },
+    /// Parallel Nodes wrote competing values to a decision field; it is left for the Qadi.
+    Conflict { field: String, nodes: Vec<String> },
     /// The Job ended; `state` is the final State.
     JobFinished { state: S },
 }
