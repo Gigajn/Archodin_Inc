@@ -31,6 +31,7 @@ pub struct Provider {
     api_key: String,
     model: String,
     account: Option<String>,
+    pricing: Option<crate::Pricing>,
 }
 
 impl Provider {
@@ -45,7 +46,18 @@ impl Provider {
             api_key: api_key.into(),
             model: model.into(),
             account: None,
+            pricing: None,
         }
+    }
+
+    /// Sets what this Provider account charges, so usage answered by it has a cost.
+    pub fn pricing(mut self, pricing: crate::Pricing) -> Self {
+        self.pricing = Some(pricing);
+        self
+    }
+
+    pub(crate) fn priced(&self, usage: crate::Usage) -> crate::Usage {
+        self.pricing.map_or(usage, |p| p.price(usage))
     }
 
     /// Names this Provider account (for example `work`), so events can tell two
@@ -208,7 +220,19 @@ impl AgentNode {
 
     /// Answers `request`, calling Tools as the model asks.
     pub async fn answer(&self, request: &str) -> Result<String, AgentError> {
-        self.converse(&[], request).await.map(|(answer, _)| answer)
+        self.answer_with_usage(request).await.map(|(a, _)| a)
+    }
+
+    /// Like [`AgentNode::answer`], also returning the tokens all model round trips
+    /// used, priced by the Model chain pair that answered each (see
+    /// [`Provider::pricing`]); the cost is 0 for a pair without pricing.
+    pub async fn answer_with_usage(
+        &self,
+        request: &str,
+    ) -> Result<(String, crate::Usage), AgentError> {
+        self.converse(&[], request)
+            .await
+            .map(|(answer, _, usage)| (answer, usage))
     }
 
     /// Answers `request` after the earlier turns in `history`, and returns the
@@ -217,8 +241,9 @@ impl AgentNode {
         &self,
         history: &[Message],
         request: &str,
-    ) -> Result<(String, Vec<Message>), AgentError> {
+    ) -> Result<(String, Vec<Message>, crate::Usage), AgentError> {
         let mut current = 0;
+        let mut usage = crate::Usage::default();
         let mut messages = vec![Message::new_system_message(&self.instructions)];
         messages.extend_from_slice(history);
         messages.push(Message::new_human_message(request));
@@ -227,12 +252,20 @@ impl AgentNode {
                 .chain
                 .generate(&mut current, &self.tools, &messages, self.on_event.as_ref())
                 .await?;
+            if let Some(t) = &result.tokens {
+                let used = crate::Usage::new(
+                    u64::from(t.prompt_tokens),
+                    u64::from(t.completion_tokens),
+                    0.0,
+                );
+                usage.add(self.chain.provider(current).priced(used));
+            }
             if result.tool_calls.is_empty() {
                 let turns = vec![
                     Message::new_human_message(request),
                     Message::new_ai_message(&result.generation),
                 ];
-                return Ok((result.generation, turns));
+                return Ok((result.generation, turns, usage));
             }
             messages.push(Message::new_ai_message_with_tool_calls(
                 &result.generation,

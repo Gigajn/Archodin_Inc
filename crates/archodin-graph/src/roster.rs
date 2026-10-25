@@ -229,6 +229,20 @@ impl Agent {
     /// Answers `request` as part of the Agent's ongoing conversation. A failed
     /// call leaves the conversation as it was.
     pub async fn ask(&self, request: &str) -> Result<String, AgentError> {
+        self.ask_with_usage(request).await.map(|(answer, _)| answer)
+    }
+
+    /// The most tokens this Agent may spend, from its Role.
+    pub fn budget_tokens(&self) -> Option<u64> {
+        self.state.role.budget()
+    }
+
+    /// Like [`Agent::ask`], also returning the usage, priced by the Model chain
+    /// pair that actually answered.
+    pub async fn ask_with_usage(
+        &self,
+        request: &str,
+    ) -> Result<(String, crate::Usage), AgentError> {
         let chain = ModelChain::from_pairs(self.model_chain())
             .ok_or_else(|| AgentError::Provider("the Model chain is empty".into()))?;
         let role = &self.state.role;
@@ -240,10 +254,10 @@ impl Agent {
             node = node.tool(tool.clone());
         }
         let mut conversation = self.state.conversation.lock().await;
-        let (answer, turns) = node.converse(&conversation, request).await?;
+        let (answer, turns, usage) = node.converse(&conversation, request).await?;
         conversation.extend(turns);
         *lock(&self.state.history_len) = conversation.len();
-        Ok(answer)
+        Ok((answer, usage))
     }
 }
 

@@ -96,6 +96,10 @@ impl ModelChain {
         self
     }
 
+    pub(crate) fn provider(&self, index: usize) -> &Provider {
+        &self.pairs[index]
+    }
+
     /// Calls the model, starting at pair `*current` and advancing it on failures.
     pub(crate) async fn generate(
         &self,
