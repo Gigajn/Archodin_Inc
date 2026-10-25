@@ -9,3 +9,7 @@ description = "Archodin: multi-agent library for an AI-staffed company, built on
 [dependencies]
 langchain-rust = { path = "../.." }
 archodin-graph = { path = "../archodin-graph" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+futures = "0.3.31"
