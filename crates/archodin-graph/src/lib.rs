@@ -15,6 +15,13 @@ pub use durable::{
     InMemoryCheckpointStore, JobOutcome, ScriptedApprover,
 };
 
+mod queue;
+
+pub use queue::{
+    Clock, JobId, JobOrigin, JobQueue, ManualClock, QueuedJob, ScheduleError, ScheduleId,
+    Scheduler, SystemClock, Timetable,
+};
+
 mod parallel;
 
 pub use parallel::{Fanout, FanoutBuilder, FanoutError, MergeRules};
