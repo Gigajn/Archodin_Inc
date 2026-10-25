@@ -26,6 +26,10 @@ mod parallel;
 
 pub use parallel::{Fanout, FanoutBuilder, FanoutError, MergeRules};
 
+mod panel;
+
+pub use panel::{Panel, PanelError, PanelResult, Qadi, QadiError};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -86,6 +90,13 @@ pub enum JobEvent<S> {
     NodeFinished { node: String },
     /// Parallel Nodes wrote competing values to a decision field; it is left for the Qadi.
     Conflict { field: String, nodes: Vec<String> },
+    /// The Qadi settled a conflict: `node`'s `value` (shown with `Debug`) became the
+    /// value of `field`.
+    Decision {
+        field: String,
+        node: String,
+        value: String,
+    },
     /// The Job ended; `state` is the final State.
     JobFinished { state: S },
     /// A durable Job paused: a step is waiting for a person's approval.

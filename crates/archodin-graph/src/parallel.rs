@@ -16,17 +16,25 @@ use std::sync::Arc;
 use futures::future::{join_all, BoxFuture};
 use futures::stream::{self, BoxStream, StreamExt};
 
-use crate::JobEvent;
+use crate::{JobEvent, Qadi};
 
 type NodeFn<S> = Arc<dyn Fn(S) -> BoxFuture<'static, S> + Send + Sync>;
 
 /// A merge rule for one field: reads the base State and each branch's State (with the
 /// branch Node names), writes into the merged State and reports conflicts.
-type Rule<S> = Arc<dyn Fn(&S, &[S], &[String], &mut S, &mut Vec<Conflict>) + Send + Sync>;
+type Rule<S> = Arc<dyn Fn(&S, &[S], &[String], &mut S, &mut Vec<Conflict<S>>) + Send + Sync>;
 
-struct Conflict {
+struct Conflict<S> {
     field: String,
     nodes: Vec<String>,
+    /// One option per competing writer, for the Qadi to choose from.
+    options: Vec<ConflictOption<S>>,
+}
+
+struct ConflictOption<S> {
+    node: String,
+    value: String,
+    apply: Arc<dyn Fn(&mut S) + Send + Sync>,
 }
 
 /// How the parallel Nodes' updates are combined, field by field.
@@ -67,13 +75,16 @@ impl<S: Clone + Send + Sync + 'static> MergeRules<S> {
     }
 
     /// Marks a field as needing a decision: if Nodes write different values to it, the
-    /// field keeps its previous value and a [`JobEvent::Conflict`] is reported.
+    /// field keeps its previous value and a [`JobEvent::Conflict`] is reported. With a Qadi
+    /// ([`FanoutBuilder::qadi`]) the conflict is then settled and recorded as a
+    /// [`JobEvent::Decision`].
     pub fn decision<T, A>(mut self, field: &str, access: A) -> Self
     where
-        T: Clone + PartialEq + Send + Sync + 'static,
+        T: Clone + PartialEq + std::fmt::Debug + Send + Sync + 'static,
         A: Fn(&mut S) -> &mut T + Send + Sync + 'static,
     {
         let field = field.to_string();
+        let access = Arc::new(access);
         self.rules
             .push(Arc::new(move |base, branches, names, out, conflicts| {
                 let mut base = base.clone();
@@ -97,6 +108,17 @@ impl<S: Clone + Send + Sync + 'static> MergeRules<S> {
                         conflicts.push(Conflict {
                             field: field.clone(),
                             nodes: writers.iter().map(|(n, _)| (*n).clone()).collect(),
+                            options: writers
+                                .iter()
+                                .map(|(n, v)| {
+                                    let (access, v) = (access.clone(), v.clone());
+                                    ConflictOption {
+                                        node: (*n).clone(),
+                                        value: format!("{v:?}"),
+                                        apply: Arc::new(move |s: &mut S| *access(s) = v.clone()),
+                                    }
+                                })
+                                .collect(),
                         });
                     }
                 }
@@ -104,7 +126,7 @@ impl<S: Clone + Send + Sync + 'static> MergeRules<S> {
         self
     }
 
-    fn merge(&self, base: &S, branches: Vec<S>, names: &[String]) -> (S, Vec<Conflict>) {
+    fn merge(&self, base: &S, branches: Vec<S>, names: &[String]) -> (S, Vec<Conflict<S>>) {
         let mut merged = branches.last().cloned().unwrap_or_else(|| base.clone());
         let mut conflicts = Vec::new();
         for rule in &self.rules {
@@ -127,9 +149,17 @@ pub struct FanoutBuilder<S> {
     rules: MergeRules<S>,
     source: Option<(String, NodeFn<S>)>,
     nodes: Vec<(String, NodeFn<S>)>,
+    qadi: Option<Qadi>,
 }
 
 impl<S: Clone + Send + Sync + 'static> FanoutBuilder<S> {
+    /// Sets the Qadi that settles conflicts on decision fields. Without one, conflicts
+    /// are only reported and the field keeps its previous value.
+    pub fn qadi(mut self, qadi: Qadi) -> Self {
+        self.qadi = Some(qadi);
+        self
+    }
+
     /// Sets the Node that runs first and fans out to the parallel Nodes.
     pub fn from<F, Fut>(mut self, name: &str, f: F) -> Self
     where
@@ -162,6 +192,7 @@ impl<S: Clone + Send + Sync + 'static> FanoutBuilder<S> {
                 rules: self.rules,
                 source: self.source,
                 nodes: self.nodes,
+                qadi: self.qadi,
             }),
         })
     }
@@ -171,6 +202,7 @@ struct Inner<S> {
     rules: MergeRules<S>,
     source: Option<(String, NodeFn<S>)>,
     nodes: Vec<(String, NodeFn<S>)>,
+    qadi: Option<Qadi>,
 }
 
 /// An optional source Node followed by Nodes that run in parallel and merge into one State.
@@ -199,6 +231,7 @@ impl<S: Clone + Send + Sync + 'static> Fanout<S> {
             rules,
             source: None,
             nodes: Vec::new(),
+            qadi: None,
         }
     }
 
@@ -253,12 +286,27 @@ impl<S: Clone + Send + Sync + 'static> Fanout<S> {
                                 run.queue
                                     .push_back(JobEvent::NodeFinished { node: node.clone() });
                             }
-                            let (merged, conflicts) = inner.rules.merge(&base, results, &names);
+                            let (mut merged, conflicts) = inner.rules.merge(&base, results, &names);
                             for c in conflicts {
                                 run.queue.push_back(JobEvent::Conflict {
-                                    field: c.field,
-                                    nodes: c.nodes,
+                                    field: c.field.clone(),
+                                    nodes: c.nodes.clone(),
                                 });
+                                let Some(qadi) = &inner.qadi else { continue };
+                                let candidates: Vec<(String, String)> = c
+                                    .options
+                                    .iter()
+                                    .map(|o| (o.node.clone(), o.value.clone()))
+                                    .collect();
+                                // An unsettled conflict leaves the field as it was.
+                                if let Ok(i) = qadi.pick(&c.field, &candidates).await {
+                                    (c.options[i].apply)(&mut merged);
+                                    run.queue.push_back(JobEvent::Decision {
+                                        field: c.field,
+                                        node: c.options[i].node.clone(),
+                                        value: c.options[i].value.clone(),
+                                    });
+                                }
                             }
                             run.queue.push_back(JobEvent::JobFinished { state: merged });
                         }
