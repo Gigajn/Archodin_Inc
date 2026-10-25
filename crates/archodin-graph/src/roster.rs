@@ -66,6 +66,11 @@ impl Role {
         &self.name
     }
 
+    /// The Role's instructions.
+    pub fn instructions(&self) -> &str {
+        &self.instructions
+    }
+
     /// The names of the Skills in the Role's Skills slot.
     pub fn skills(&self) -> &[String] {
         &self.skills
@@ -144,6 +149,18 @@ impl Roster {
         };
         inner.agents.push(agent.clone());
         Ok(agent)
+    }
+
+    /// The Role called `name`, if there is one.
+    pub fn role(&self, name: &str) -> Option<Role> {
+        lock(&self.inner).roles.get(name).cloned()
+    }
+
+    /// Lets the Agent called `name` go, returning it if there was one.
+    pub fn release(&self, name: &str) -> Option<Agent> {
+        let mut inner = lock(&self.inner);
+        let at = inner.agents.iter().position(|a| a.name() == name)?;
+        Some(inner.agents.remove(at))
     }
 
     /// The Agent called `name`, if there is one.

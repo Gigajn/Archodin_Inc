@@ -40,6 +40,9 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 
+mod nakama;
+pub use nakama::{Nakama, Proposal, Workload};
+
 mod roster;
 pub use roster::{branch_name, Agent, Role, Roster, RosterError};
 
