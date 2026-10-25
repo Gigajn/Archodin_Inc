@@ -1,0 +1,29 @@
+mod error;
+
+pub mod embedder_trait;
+pub use embedder_trait::*;
+
+#[cfg(feature = "ollama")]
+pub mod ollama;
+#[cfg(feature = "ollama")]
+pub use ollama::*;
+
+pub mod openai;
+pub mod voyage;
+pub use error::*;
+
+mod vectors;
+pub use vectors::{combine_vectors, cosine_similarity};
+
+#[cfg(feature = "fastembed")]
+mod fastembed;
+#[cfg(feature = "fastembed")]
+pub use fastembed::*;
+
+#[cfg(feature = "mistralai")]
+pub mod mistralai;
+#[cfg(feature = "mistralai")]
+pub use mistralai::*;
+
+#[cfg(feature = "bedrock")]
+pub mod bedrock;
