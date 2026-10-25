@@ -20,6 +20,18 @@ _Avoid_: Position, persona, template
 The Agent that acts as HR: it watches workload and Budgets, proposes hiring Agents from a Role or letting them go, and drafts new Roles, all for a person to approve.
 _Avoid_: HR, recruiter, staffing
 
+**Department**:
+A standing group of Agents led by a Strategos, with its own Graph, Budget and goal; departments can sit inside other departments.
+_Avoid_: Team, division, unit
+
+**Explorador**:
+The Agent that grows the company: it looks for new opportunities, such as an open-source project on GitHub, and proposes a Department to pursue each one.
+_Avoid_: Expander, scout, business developer
+
+**Charter**:
+An Explorador's proposal for a new Department: its goal, where its work comes from, its Roles and its Budget; nothing is created until a person approves it.
+_Avoid_: Proposal, plan, pitch
+
 **Job**:
 A piece of work a person submits from the Agora, which a Strategos breaks down and runs as a Graph.
 _Avoid_: Task, request, ticket
