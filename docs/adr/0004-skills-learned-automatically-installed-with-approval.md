@@ -1,0 +1,3 @@
+# Skills are found and refined automatically, but installed only with a person's approval
+
+Archodin follows a Hermes-style learning loop: Agents write and refine Skills (`SKILL.md`, agentskills.io format) from experience, and a Scout searches for Skills a task needs before work is assigned. Searching is automatic, but nothing is installed until a person approves it, and every change is kept as a version that can be rolled back. Automatic updates are limited to Skills and memory; they never touch Archodin's code, Provider configuration or Tool permissions. A downloaded Skill is instructions and scripts from a third party that every later run will follow, so letting it in unreviewed would be the easiest way to take over an Agent.
