@@ -1,5 +1,6 @@
 use aahc_core::app::app;
 use aahc_core::config::Config;
+use aahc_core::db;
 
 #[tokio::main]
 async fn main() {
@@ -7,6 +8,42 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned()))
         .init();
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("init-db") {
+        let db_path = args
+            .iter()
+            .position(|arg| arg == "--db")
+            .and_then(|index| args.get(index + 1))
+            .map(std::path::PathBuf::from);
+        let db_path = match db_path {
+            Some(path) => path,
+            None => match Config::from_env() {
+                Ok(config) => config.db_path,
+                Err(error) => {
+                    eprintln!("cannot resolve database path: {error}");
+                    std::process::exit(2);
+                }
+            },
+        };
+        match db::init_database(&db_path).await {
+            Ok(summary) => {
+                println!(
+                    "AAHC database ready at {}: {} tables, {}/{} lanes ({} new)",
+                    db_path.display(),
+                    summary.tables,
+                    summary.lanes_total,
+                    summary.lanes_total,
+                    summary.lanes_inserted,
+                );
+            }
+            Err(error) => {
+                eprintln!("cannot initialise database: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     let config = match Config::from_env() {
         Ok(config) => config,
