@@ -28,7 +28,7 @@ const MAX_ROUNDS: usize = 10;
 #[derive(Debug, Clone)]
 pub struct Provider {
     base_url: String,
-    api_key: String,
+    api_key: KeySource,
     model: String,
     account: Option<String>,
     pricing: Option<crate::Pricing>,
@@ -43,11 +43,24 @@ impl Provider {
     ) -> Self {
         Self {
             base_url: base_url.into(),
-            api_key: api_key.into(),
+            api_key: KeySource::Fixed(api_key.into()),
             model: model.into(),
             account: None,
             pricing: None,
         }
+    }
+
+    /// A Provider account whose API key is the vault secret `secret`, looked up at
+    /// every call so a rotated key applies without a restart.
+    pub fn from_vault(
+        base_url: impl Into<String>,
+        vault: &crate::Vault,
+        secret: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        let mut provider = Self::openai_compatible(base_url, "", model);
+        provider.api_key = KeySource::Vault(vault.clone(), secret.into());
+        provider
     }
 
     /// Sets what this Provider account charges, so usage answered by it has a cost.
@@ -76,10 +89,26 @@ impl Provider {
         )
     }
 
-    pub(crate) fn llm(&self, tools: &[AgentTool]) -> OpenAI<OpenAIConfig> {
+    /// Hides a vault secret's value from error text.
+    pub(crate) fn redact(&self, text: String) -> String {
+        match &self.api_key {
+            KeySource::Vault(vault, _) => vault.redact(&text),
+            KeySource::Fixed(_) => text,
+        }
+    }
+
+    pub(crate) fn llm(&self, tools: &[AgentTool]) -> Result<OpenAI<OpenAIConfig>, String> {
+        let key = match &self.api_key {
+            KeySource::Fixed(key) => key.clone(),
+            KeySource::Vault(vault, name) => vault
+                .resolve(name)
+                .map_err(|e| e.to_string())?
+                .expose()
+                .to_string(),
+        };
         let config = OpenAIConfig::new()
             .with_api_base(&self.base_url)
-            .with_api_key(&self.api_key);
+            .with_api_key(key);
         let mut options = CallOptions::default();
         if !tools.is_empty() {
             options = options.with_functions(
@@ -89,9 +118,24 @@ impl Provider {
                     .collect(),
             );
         }
-        OpenAI::new(config)
+        Ok(OpenAI::new(config)
             .with_model(self.model.clone())
-            .with_options(options)
+            .with_options(options))
+    }
+}
+
+#[derive(Clone)]
+enum KeySource {
+    Fixed(String),
+    Vault(crate::Vault, String),
+}
+
+impl std::fmt::Debug for KeySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fixed(_) => f.write_str("KeySource::Fixed(..)"),
+            Self::Vault(_, name) => write!(f, "KeySource::Vault({name})"),
+        }
     }
 }
 
