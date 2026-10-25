@@ -8,6 +8,10 @@
 //! State). A Job stops at the Step limit (default 25, settable per run).
 //! Checkpoints arrive with a later ticket.
 
+mod parallel;
+
+pub use parallel::{Fanout, FanoutBuilder, FanoutError, MergeRules};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -63,6 +67,8 @@ pub enum JobEvent<S> {
     NodeStarted { node: String },
     /// A Node finished and its update was applied to the State.
     NodeFinished { node: String },
+    /// Parallel Nodes wrote competing values to a decision field; it is left for the Qadi.
+    Conflict { field: String, nodes: Vec<String> },
     /// The Job ended; `state` is the final State.
     JobFinished { state: S },
     /// The Job stopped because it hit the Step limit; `state` is the State so far.
