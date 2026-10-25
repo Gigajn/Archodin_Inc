@@ -8,3 +8,5 @@ description = "Archodin Graph orchestration (placeholder)"
 
 [dependencies]
 langchain-rust = { path = "../.." }
+futures = "0.3.31"
+thiserror = "2.0.17"
