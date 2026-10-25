@@ -1,0 +1,3 @@
+# Forja may develop Archodin, but only through pull requests a person merges
+
+Explorador can only assemble Departments from capabilities Archodin already has, so new library capabilities (MCP, persistent storage, secrets, sandboxes, scheduling and others) need someone to build them. Kudo chose to let an internal Department, Forja, do that work so the company can extend itself. Forja works like any open-source Department: `<agent-name>/<topic>` branches and pull requests to Archodin_Inc, and nothing it writes reaches `main`, or any running Department, until a person reviews and merges it. Other Agents still never change Archodin's code (ADR 0004).

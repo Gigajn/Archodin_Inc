@@ -24,6 +24,10 @@ _Avoid_: HR, recruiter, staffing
 A standing group of Agents led by a Strategos, with its own Graph, Budget and goal; departments can sit inside other departments.
 _Avoid_: Team, division, unit
 
+**Forja**:
+The company's own research and development Department, which builds new Archodin capabilities and proposes them as pull requests that only a person can merge.
+_Avoid_: R&D, engineering team, platform team
+
 **Explorador**:
 The Agent that grows the company: it looks for new opportunities, such as an open-source project on GitHub, and proposes new Departments or upgrades to Departments already running.
 _Avoid_: Expander, scout, business developer
