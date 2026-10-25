@@ -380,3 +380,5 @@ mod handoff;
 pub use handoff::{Briefing, Handoff, Turn, HISTORY_TOOL};
 mod skills;
 pub use skills::{FlowRun, PendingSkill, Skill, SkillError, SkillKind, SkillLibrary};
+mod mcp;
+pub use mcp::{McpClient, McpError, McpLibrary, McpServer, PendingMcpServer};
