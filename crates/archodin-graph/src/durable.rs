@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 
-use crate::{Graph, GraphBuilder, GraphError, JobEvent};
+use crate::{Edge, Graph, GraphBuilder, GraphError, JobEvent, RunOptions, END};
 
 /// A saved copy of the State after a step.
 #[derive(Debug, Clone, PartialEq)]
@@ -182,8 +182,20 @@ enum Phase<S> {
 
 impl<S: Clone + Send + 'static> Graph<S> {
     /// The Node after `_node` given the State; `None` ends the Job.
-    fn next_after(&self, _node: &str, _state: &S) -> Option<String> {
-        None
+    fn next_after(&self, node: &str, state: &S) -> Option<String> {
+        let next = match self.inner.edges.get(node) {
+            None => END,
+            Some(Edge::To(t)) => t.as_str(),
+            Some(Edge::Conditional { router, targets }) => {
+                let chosen = router(state);
+                assert!(
+                    targets.iter().any(|t| t == chosen),
+                    "conditional edge from `{node}` returned undeclared target `{chosen}`"
+                );
+                chosen
+            }
+        };
+        (next != END).then(|| next.to_string())
     }
 
     /// Streams a durable Job: Checkpoints are written as it goes, and an
@@ -195,6 +207,20 @@ impl<S: Clone + Send + 'static> Graph<S> {
         store: &'a dyn CheckpointStore<S>,
         approver: &'a dyn Approver,
     ) -> BoxStream<'a, JobEvent<S>> {
+        self.stream_job_with(job, initial, store, approver, RunOptions::default())
+    }
+
+    /// Like [`Graph::stream_job`] with `options`. The Step limit counts the steps
+    /// already completed in earlier runs of the same Job, so it holds across resume.
+    pub fn stream_job_with<'a>(
+        &'a self,
+        job: &str,
+        initial: S,
+        store: &'a dyn CheckpointStore<S>,
+        approver: &'a dyn Approver,
+        options: RunOptions,
+    ) -> BoxStream<'a, JobEvent<S>> {
+        let limit = options.step_limit;
         let job = job.to_string();
         stream::unfold(Phase::Begin(initial), move |phase| {
             let job = job.clone();
@@ -209,12 +235,12 @@ impl<S: Clone + Send + 'static> Graph<S> {
                                         job: job.clone(),
                                         step: 0,
                                         state: initial.clone(),
-                                        next: Some(self.entry.clone()),
+                                        next: Some(self.inner.entry.clone()),
                                     })
                                     .await;
                                 Phase::At {
                                     state: initial,
-                                    node: self.entry.clone(),
+                                    node: self.inner.entry.clone(),
                                     step: 0,
                                 }
                             }
@@ -229,8 +255,11 @@ impl<S: Clone + Send + 'static> Graph<S> {
                         };
                         Some((JobEvent::JobStarted, next))
                     }
+                    Phase::At { state, step, .. } if step >= limit => {
+                        Some((JobEvent::StepLimitReached { limit, state }, Phase::Done))
+                    }
                     Phase::At { state, node, step } => {
-                        if let Some(prompt) = self.approvals.get(&node) {
+                        if let Some(prompt) = self.inner.approvals.get(&node) {
                             let prompt = prompt(&state);
                             let request = ApprovalRequest {
                                 job: job.clone(),
@@ -263,7 +292,7 @@ impl<S: Clone + Send + 'static> Graph<S> {
                         ))
                     }
                     Phase::Run { state, node, step } => {
-                        let updated = (self.nodes[&node])(state).await;
+                        let updated = (self.inner.nodes[&node])(state).await;
                         let next = self.next_after(&node, &updated);
                         store
                             .save(Checkpoint {
@@ -299,7 +328,21 @@ impl<S: Clone + Send + 'static> Graph<S> {
         store: &dyn CheckpointStore<S>,
         approver: &dyn Approver,
     ) -> Result<JobOutcome<S>, GraphError> {
-        let mut events = self.stream_job(job, initial, store, approver);
+        self.run_job_with(job, initial, store, approver, RunOptions::default())
+            .await
+    }
+
+    /// Like [`Graph::run_job`] with `options`; hitting the Step limit returns
+    /// [`GraphError::StepLimitReached`], and the Job can resume with a higher limit.
+    pub async fn run_job_with(
+        &self,
+        job: &str,
+        initial: S,
+        store: &dyn CheckpointStore<S>,
+        approver: &dyn Approver,
+        options: RunOptions,
+    ) -> Result<JobOutcome<S>, GraphError> {
+        let mut events = self.stream_job_with(job, initial, store, approver, options);
         while let Some(event) = events.next().await {
             match event {
                 JobEvent::JobFinished { state } => return Ok(JobOutcome::Finished(state)),
@@ -313,6 +356,9 @@ impl<S: Clone + Send + 'static> Graph<S> {
                         prompt,
                         state,
                     })
+                }
+                JobEvent::StepLimitReached { limit, .. } => {
+                    return Err(GraphError::StepLimitReached { limit })
                 }
                 JobEvent::JobRejected { node, state } => {
                     return Ok(JobOutcome::Rejected { node, state })

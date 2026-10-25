@@ -10,3 +10,6 @@ description = "Archodin Graph orchestration (placeholder)"
 langchain-rust = { path = "../.." }
 futures = "0.3.31"
 thiserror = "2.0.17"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

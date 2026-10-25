@@ -142,3 +142,46 @@ fn the_approval_interface_is_a_trait_the_agora_can_implement() {
     fn takes_approver(_: &dyn Approver) {}
     takes_approver(&ScriptedApprover::new([]));
 }
+
+fn chain_graph() -> Graph<Tally> {
+    Graph::builder()
+        .node("a", |s: Tally| async move { Tally { total: s.total + 1 } })
+        .node("b", |s: Tally| async move {
+            Tally {
+                total: s.total * 10,
+            }
+        })
+        .node("c", |s: Tally| async move { Tally { total: s.total + 5 } })
+        .edge("a", "b")
+        .conditional_edge("b", |_| "c", &["c", archodin::graph::END])
+        .edge("c", archodin::graph::END)
+        .entry("a")
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn resume_follows_edges_and_the_step_limit_holds_across_resume() {
+    use archodin::graph::{GraphError, RunOptions};
+    let store = InMemoryCheckpointStore::<Tally>::new();
+    let approver = ScriptedApprover::new([]);
+    let limited = RunOptions::new().step_limit(2);
+    let stopped = chain_graph()
+        .run_job_with("job-1", Tally { total: 1 }, &store, &approver, limited)
+        .await;
+    assert_eq!(stopped, Err(GraphError::StepLimitReached { limit: 2 }));
+
+    // Resuming with the same limit stays stopped: the two steps already count.
+    let again = chain_graph()
+        .run_job_with("job-1", Tally { total: 1 }, &store, &approver, limited)
+        .await;
+    assert_eq!(again, Err(GraphError::StepLimitReached { limit: 2 }));
+
+    let done = chain_graph()
+        .run_job("job-1", Tally { total: 1 }, &store, &approver)
+        .await
+        .unwrap();
+    let plain = chain_graph().run(Tally { total: 1 }).await.unwrap();
+    assert_eq!(done, JobOutcome::Finished(plain));
+    assert_eq!(store.checkpoints("job-1").await.len(), 4);
+}
