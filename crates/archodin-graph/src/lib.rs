@@ -6,7 +6,14 @@
 //!
 //! Nodes are joined by Edges, some conditional (they pick the next Node from the
 //! State). A Job stops at the Step limit (default 25, settable per run).
-//! Checkpoints arrive with a later ticket.
+//! Durable Jobs write Checkpoints, resume, and can pause for approval.
+
+mod durable;
+
+pub use durable::{
+    ApprovalDecision, ApprovalRequest, Approver, Checkpoint, CheckpointStore,
+    InMemoryCheckpointStore, JobOutcome, ScriptedApprover,
+};
 
 mod parallel;
 
@@ -71,6 +78,14 @@ pub enum JobEvent<S> {
     Conflict { field: String, nodes: Vec<String> },
     /// The Job ended; `state` is the final State.
     JobFinished { state: S },
+    /// A durable Job paused: a step is waiting for a person's approval.
+    JobPaused {
+        node: String,
+        prompt: String,
+        state: S,
+    },
+    /// A durable Job stopped because a person rejected a step.
+    JobRejected { node: String, state: S },
     /// The Job stopped because it hit the Step limit; `state` is the State so far.
     StepLimitReached { limit: usize, state: S },
 }
@@ -109,6 +124,7 @@ pub struct GraphBuilder<S> {
     edge_order: Vec<String>,
     duplicate_edge: Option<String>,
     entry: Option<String>,
+    approvals: HashMap<String, durable::PromptFn<S>>,
 }
 
 impl<S: Send + 'static> GraphBuilder<S> {
@@ -187,6 +203,7 @@ impl<S: Send + 'static> GraphBuilder<S> {
                 nodes: self.nodes,
                 edges: self.edges,
                 entry,
+                approvals: self.approvals,
             }),
         })
     }
@@ -196,6 +213,7 @@ struct Inner<S> {
     nodes: HashMap<String, NodeFn<S>>,
     edges: HashMap<String, Edge<S>>,
     entry: String,
+    approvals: HashMap<String, durable::PromptFn<S>>,
 }
 
 /// Nodes over one shared State, ready to run Jobs.
@@ -226,6 +244,7 @@ impl<S: Clone + Send + 'static> Graph<S> {
             edge_order: Vec::new(),
             duplicate_edge: None,
             entry: None,
+            approvals: HashMap::new(),
         }
     }
 
