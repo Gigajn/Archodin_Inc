@@ -19,6 +19,13 @@ mod budget;
 
 pub use budget::{Budget, BudgetApprover, BudgetScope, Pricing, Usage, UsageMeter};
 
+mod queue;
+
+pub use queue::{
+    Clock, JobId, JobOrigin, JobQueue, ManualClock, QueuedJob, ScheduleError, ScheduleId,
+    Scheduler, SystemClock, Timetable,
+};
+
 mod parallel;
 
 pub use parallel::{Fanout, FanoutBuilder, FanoutError, MergeRules};
@@ -29,8 +36,13 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 
+mod roster;
+pub use roster::{branch_name, Agent, Role, Roster, RosterError};
+
 mod agent;
+mod chain;
 pub use agent::{AgentError, AgentNode, AgentTool, Provider, TypedTool};
+pub use chain::{ChainEvent, FallbackReason, ModelChain, ModelPair};
 
 type NodeFn<S> = Arc<dyn Fn(S) -> BoxFuture<'static, S> + Send + Sync>;
 type RouterFn<S> = Arc<dyn Fn(&S) -> &'static str + Send + Sync>;

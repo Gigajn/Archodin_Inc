@@ -45,7 +45,7 @@ impl Usage {
         self.prompt_tokens + self.completion_tokens
     }
 
-    fn add(&mut self, other: Usage) {
+    pub(crate) fn add(&mut self, other: Usage) {
         self.prompt_tokens += other.prompt_tokens;
         self.completion_tokens += other.completion_tokens;
         self.cost += other.cost;
@@ -196,6 +196,13 @@ impl UsageMeter {
             .retain(|w| *w != BudgetScope::Agent(agent.to_string()));
     }
 
+    fn set_agent_budget_if_unset(&self, agent: &str, budget: Budget) {
+        let unset = !self.state.lock().unwrap().agent_budgets.contains_key(agent);
+        if unset {
+            self.set_agent_budget(agent, budget);
+        }
+    }
+
     /// The first exceeded Budget, Job before Agent, that has not had its overrun approved.
     pub fn exceeded(&self, job: &str, agent: &str) -> Option<BudgetScope> {
         self.exceeded_with_reason(job, agent)
@@ -330,6 +337,42 @@ impl<S: Send + 'static> GraphBuilder<S> {
                 let (updated, usage) = f(s).await;
                 meter.record(&job, &agent, usage);
                 updated
+            }
+        })
+    }
+}
+
+impl<S: Send + 'static> GraphBuilder<S> {
+    /// Adds a Node run by a Roster [`Agent`](crate::Agent), metered like
+    /// [`GraphBuilder::metered_node`] under the Agent's name. The usage is priced by
+    /// the Model chain pair that answered. If the Agent's Role sets a token Budget
+    /// and the meter has no Budget for the Agent yet, that Budget applies.
+    pub fn metered_agent_node<J, R, W>(
+        self,
+        name: &str,
+        agent: crate::Agent,
+        meter: Arc<UsageMeter>,
+        job_of: J,
+        read: R,
+        write: W,
+    ) -> Self
+    where
+        J: Fn(&S) -> String + Send + Sync + 'static,
+        R: Fn(&S) -> String + Send + Sync + 'static,
+        W: Fn(S, Result<String, crate::AgentError>) -> S + Send + Sync + 'static,
+    {
+        if let Some(tokens) = agent.budget_tokens() {
+            meter.set_agent_budget_if_unset(agent.name(), Budget::tokens(tokens));
+        }
+        let (read, write) = (Arc::new(read), Arc::new(write));
+        let agent_name = agent.name().to_string();
+        self.metered_node(name, &agent_name, meter, job_of, move |state: S| {
+            let (agent, read, write) = (agent.clone(), read.clone(), write.clone());
+            async move {
+                match agent.ask_with_usage(&read(&state)).await {
+                    Ok((answer, usage)) => (write(state, Ok(answer)), usage),
+                    Err(e) => (write(state, Err(e)), Usage::default()),
+                }
             }
         })
     }

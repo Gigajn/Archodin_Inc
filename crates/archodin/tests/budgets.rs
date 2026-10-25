@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use archodin::graph::{
     AgentNode, ApprovalDecision, Budget, BudgetApprover, Graph, InMemoryCheckpointStore,
-    JobOutcome, Pricing, Provider, ScriptedApprover, Usage, UsageMeter,
+    JobOutcome, Pricing, Provider, Role, Roster, ScriptedApprover, Usage, UsageMeter,
 };
 use mockito::Server;
 use serde_json::json;
@@ -229,4 +229,111 @@ async fn an_agent_node_reports_the_tokens_the_provider_used() {
     // $2 per million prompt tokens and $4 per million completion tokens.
     let priced = Pricing::per_million(2.0, 4.0).price(usage);
     assert!((priced.cost - 0.004).abs() < 1e-9, "{}", priced.cost);
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Ask {
+    job: String,
+    answers: Vec<String>,
+}
+
+#[tokio::test]
+async fn a_roster_agent_is_metered_by_the_pair_that_answered_and_stopped_by_its_budget() {
+    let mut limited = Server::new_async().await;
+    limited
+        .mock("POST", "/chat/completions")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({"error": {"message": "slow", "type": "rate_limit", "code": "rate_limit"}})
+                .to_string(),
+        )
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    let mut working = Server::new_async().await;
+    working
+        .mock("POST", "/chat/completions")
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "id": "c1", "object": "chat.completion", "created": 0, "model": "fake",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}
+            })
+            .to_string(),
+        )
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    let first = Provider::openai_compatible(limited.url(), "k", "big")
+        .account("a")
+        .pricing(Pricing::per_million(100.0, 100.0));
+    let second = Provider::openai_compatible(working.url(), "k", "small")
+        .account("b")
+        .pricing(Pricing::per_million(2.0, 4.0));
+
+    let roster = Roster::new();
+    roster.add_role(
+        Role::new("Writer", "Be brief")
+            .model_chain(vec![first, second])
+            .budget_tokens(1000),
+    );
+    let nova = roster.hire("Writer", "Nova").unwrap();
+
+    let meter = Arc::new(UsageMeter::new());
+    let build = || {
+        let mut builder = Graph::builder();
+        for name in ["one", "two"] {
+            builder = builder.metered_agent_node(
+                name,
+                nova.clone(),
+                meter.clone(),
+                |s: &Ask| s.job.clone(),
+                |_: &Ask| "write".to_string(),
+                |mut s: Ask, a| {
+                    s.answers.push(a.unwrap());
+                    s
+                },
+            );
+        }
+        builder.edge("one", "two").entry("one").build().unwrap()
+    };
+    let start = Ask {
+        job: "job-1".into(),
+        answers: vec![],
+    };
+    let store = InMemoryCheckpointStore::new();
+
+    // The first answer (1500 tokens) is over Nova's 1000 token Budget: "two" waits.
+    let wait = BudgetApprover::new(meter.clone(), ScriptedApprover::new([]));
+    let paused = build()
+        .run_job("job-1", start.clone(), &store, &wait)
+        .await
+        .unwrap();
+    assert!(matches!(paused, JobOutcome::Paused { ref node, .. } if node == "two"));
+    let used = meter.agent_usage("Nova");
+    assert_eq!(used.total_tokens(), 1500);
+    // Priced by the second pair, which answered, not the first, which failed.
+    assert!((used.cost - 0.004).abs() < 1e-9, "{}", used.cost);
+    assert_eq!(meter.job_usage("job-1"), used);
+
+    let no = BudgetApprover::new(
+        meter.clone(),
+        ScriptedApprover::new([ApprovalDecision::Rejected]),
+    );
+    let rejected = build()
+        .run_job("job-1", start.clone(), &store, &no)
+        .await
+        .unwrap();
+    assert!(matches!(rejected, JobOutcome::Rejected { .. }));
+
+    let yes = BudgetApprover::new(
+        meter.clone(),
+        ScriptedApprover::new([ApprovalDecision::Approved]),
+    );
+    let done = build().run_job("job-1", start, &store, &yes).await.unwrap();
+    assert!(matches!(done, JobOutcome::Finished(ref s) if s.answers.len() == 2));
+    assert_eq!(meter.agent_usage("Nova").total_tokens(), 3000);
 }

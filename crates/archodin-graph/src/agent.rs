@@ -10,7 +10,6 @@ use std::future::Future;
 use std::sync::Arc;
 
 use futures::future::{join_all, BoxFuture};
-use langchain_rust::language_models::llm::LLM;
 use langchain_rust::language_models::options::CallOptions;
 use langchain_rust::llm::openai::{OpenAI, OpenAIConfig};
 use langchain_rust::schemas::{FunctionDefinition, Message};
@@ -18,6 +17,7 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::chain::{ChainEvent, ModelChain, ModelPair};
 use crate::GraphBuilder;
 
 /// The most model round trips one Agent run may take before it gives up.
@@ -30,6 +30,8 @@ pub struct Provider {
     base_url: String,
     api_key: String,
     model: String,
+    account: Option<String>,
+    pricing: Option<crate::Pricing>,
 }
 
 impl Provider {
@@ -43,10 +45,38 @@ impl Provider {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
+            account: None,
+            pricing: None,
         }
     }
 
-    fn llm(&self, tools: &[AgentTool]) -> OpenAI<OpenAIConfig> {
+    /// Sets what this Provider account charges, so usage answered by it has a cost.
+    pub fn pricing(mut self, pricing: crate::Pricing) -> Self {
+        self.pricing = Some(pricing);
+        self
+    }
+
+    pub(crate) fn priced(&self, usage: crate::Usage) -> crate::Usage {
+        self.pricing.map_or(usage, |p| p.price(usage))
+    }
+
+    /// Names this Provider account (for example `work`), so events can tell two
+    /// accounts of the same Provider apart. Defaults to the base URL.
+    pub fn account(mut self, name: impl Into<String>) -> Self {
+        self.account = Some(name.into());
+        self
+    }
+
+    pub(crate) fn pair(&self) -> ModelPair {
+        ModelPair::new(
+            self.account
+                .clone()
+                .unwrap_or_else(|| self.base_url.clone()),
+            self.model.clone(),
+        )
+    }
+
+    pub(crate) fn llm(&self, tools: &[AgentTool]) -> OpenAI<OpenAIConfig> {
         let config = OpenAIConfig::new()
             .with_api_base(&self.base_url)
             .with_api_key(&self.api_key);
@@ -154,19 +184,32 @@ pub enum AgentError {
 /// An Agent that can run as a Node: instructions, Tools and a Provider.
 #[derive(Clone)]
 pub struct AgentNode {
-    provider: Provider,
+    chain: ModelChain,
     instructions: String,
     tools: Vec<AgentTool>,
+    on_event: Option<Arc<dyn Fn(ChainEvent) + Send + Sync>>,
 }
 
 impl AgentNode {
     /// An Agent with `instructions` that talks to `provider`.
     pub fn new(provider: Provider, instructions: impl Into<String>) -> Self {
+        Self::with_chain(ModelChain::new(provider), instructions)
+    }
+
+    /// An Agent with `instructions` that follows a Model chain (ADR 0005).
+    pub fn with_chain(chain: ModelChain, instructions: impl Into<String>) -> Self {
         Self {
-            provider,
+            chain,
             instructions: instructions.into(),
             tools: Vec::new(),
+            on_event: None,
         }
+    }
+
+    /// Reports each fallback along the Model chain to `listener`.
+    pub fn on_event(mut self, listener: impl Fn(ChainEvent) + Send + Sync + 'static) -> Self {
+        self.on_event = Some(Arc::new(listener));
+        self
     }
 
     /// Gives the Agent a Tool.
@@ -181,28 +224,48 @@ impl AgentNode {
     }
 
     /// Like [`AgentNode::answer`], also returning the tokens all model round trips
-    /// used (its `cost` is 0 until priced with [`crate::Pricing::price`]).
+    /// used, priced by the Model chain pair that answered each (see
+    /// [`Provider::pricing`]); the cost is 0 for a pair without pricing.
     pub async fn answer_with_usage(
         &self,
         request: &str,
     ) -> Result<(String, crate::Usage), AgentError> {
+        self.converse(&[], request)
+            .await
+            .map(|(answer, _, usage)| (answer, usage))
+    }
+
+    /// Answers `request` after the earlier turns in `history`, and returns the
+    /// answer with the turns this call added (the request and the answer).
+    pub(crate) async fn converse(
+        &self,
+        history: &[Message],
+        request: &str,
+    ) -> Result<(String, Vec<Message>, crate::Usage), AgentError> {
+        let mut current = 0;
         let mut usage = crate::Usage::default();
-        let llm = self.provider.llm(&self.tools);
-        let mut messages = vec![
-            Message::new_system_message(&self.instructions),
-            Message::new_human_message(request),
-        ];
+        let mut messages = vec![Message::new_system_message(&self.instructions)];
+        messages.extend_from_slice(history);
+        messages.push(Message::new_human_message(request));
         for _ in 0..MAX_ROUNDS {
-            let result = llm
-                .generate(&messages)
-                .await
-                .map_err(|e| AgentError::Provider(e.to_string()))?;
+            let result = self
+                .chain
+                .generate(&mut current, &self.tools, &messages, self.on_event.as_ref())
+                .await?;
             if let Some(t) = &result.tokens {
-                usage.prompt_tokens += u64::from(t.prompt_tokens);
-                usage.completion_tokens += u64::from(t.completion_tokens);
+                let used = crate::Usage::new(
+                    u64::from(t.prompt_tokens),
+                    u64::from(t.completion_tokens),
+                    0.0,
+                );
+                usage.add(self.chain.provider(current).priced(used));
             }
             if result.tool_calls.is_empty() {
-                return Ok((result.generation, usage));
+                let turns = vec![
+                    Message::new_human_message(request),
+                    Message::new_ai_message(&result.generation),
+                ];
+                return Ok((result.generation, turns, usage));
             }
             messages.push(Message::new_ai_message_with_tool_calls(
                 &result.generation,
