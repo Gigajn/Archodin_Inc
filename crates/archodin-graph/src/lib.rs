@@ -32,6 +32,9 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 
+mod roster;
+pub use roster::{branch_name, Agent, Role, Roster, RosterError};
+
 mod agent;
 pub use agent::{AgentError, AgentNode, AgentTool, Provider, TypedTool};
 
