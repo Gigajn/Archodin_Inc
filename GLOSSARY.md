@@ -25,11 +25,11 @@ A standing group of Agents led by a Strategos, with its own Graph, Budget and go
 _Avoid_: Team, division, unit
 
 **Explorador**:
-The Agent that grows the company: it looks for new opportunities, such as an open-source project on GitHub, and proposes a Department to pursue each one.
+The Agent that grows the company: it looks for new opportunities, such as an open-source project on GitHub, and proposes new Departments or upgrades to Departments already running.
 _Avoid_: Expander, scout, business developer
 
 **Charter**:
-A proposal for a new Department: its goal, where its work comes from (for example a GitHub repository a person links in the Agora), its Roles and its Budget; nothing is created until a person approves it.
+A proposal for a new Department, or for an upgrade to a running one (more Roles or Agents, new Skills, a changed Graph or Budget): its goal, where its work comes from (for example a GitHub repository a person links in the Agora), its Roles and its Budget; nothing is created until a person approves it.
 _Avoid_: Proposal, plan, pitch
 
 **Job**:
