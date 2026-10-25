@@ -9,7 +9,7 @@ description = "Archodin Graph orchestration (placeholder)"
 [dependencies]
 langchain-rust = { path = "../.." }
 futures = "0.3.31"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "process", "io-util"] }
 thiserror = "2.0.17"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

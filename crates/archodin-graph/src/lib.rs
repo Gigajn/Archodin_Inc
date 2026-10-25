@@ -380,3 +380,8 @@ mod handoff;
 pub use handoff::{Briefing, Handoff, Turn, HISTORY_TOOL};
 mod skills;
 pub use skills::{FlowRun, PendingSkill, Skill, SkillError, SkillKind, SkillLibrary};
+mod sandbox;
+pub use sandbox::{
+    run_skill_script, ContainerSandbox, Limit, Sandbox, SandboxError, SandboxInput, SandboxOutput,
+    SandboxPolicy, SandboxTool, ScriptedSandbox, SkillScriptError,
+};
