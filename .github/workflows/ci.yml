@@ -15,6 +15,10 @@ on:
     paths-ignore:
       - 'renovate.json'
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -53,6 +57,16 @@ jobs:
         with:
           command: fmt
           args: --all -- --check
+      - name: Clippy (Archodin crates, warnings as errors)
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: -p archodin -p archodin-graph --all-targets --no-deps -- -D warnings
+      - name: Test (Archodin crates)
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p archodin -p archodin-graph
       - name: Build release
         uses: actions-rs/cargo@v1
         with:

@@ -1,0 +1,11 @@
+[package]
+name = "archodin"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-Proprietary"
+publish = false
+description = "Archodin: multi-agent library for an AI-staffed company, built on langchain-rust"
+
+[dependencies]
+langchain-rust = { path = "../.." }
+archodin-graph = { path = "../archodin-graph" }

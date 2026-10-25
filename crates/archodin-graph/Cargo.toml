@@ -1,0 +1,10 @@
+[package]
+name = "archodin-graph"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-Proprietary"
+publish = false
+description = "Archodin Graph orchestration (placeholder)"
+
+[dependencies]
+langchain-rust = { path = "../.." }
