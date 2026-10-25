@@ -40,6 +40,9 @@ mod chain;
 pub use agent::{AgentError, AgentNode, AgentTool, Provider, TypedTool};
 pub use chain::{ChainEvent, FallbackReason, ModelChain, ModelPair};
 
+mod strategos;
+pub use strategos::{Assignment, Piece, Strategos, StrategosError, StrategosEvent};
+
 type NodeFn<S> = Arc<dyn Fn(S) -> BoxFuture<'static, S> + Send + Sync>;
 type RouterFn<S> = Arc<dyn Fn(&S) -> &'static str + Send + Sync>;
 
