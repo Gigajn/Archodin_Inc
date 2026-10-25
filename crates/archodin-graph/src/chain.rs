@@ -110,14 +110,22 @@ impl ModelChain {
     ) -> Result<GenerateResult, AgentError> {
         loop {
             let provider = &self.pairs[*current];
-            let llm = provider.llm(tools);
-            let call = llm.generate(messages);
-            let outcome = match self.timeout {
-                Some(limit) => match tokio::time::timeout(limit, call).await {
-                    Ok(result) => result.map_err(|e| classify(e.to_string())),
-                    Err(_) => Err(FallbackReason::Timeout),
-                },
-                None => call.await.map_err(|e| classify(e.to_string())),
+            let outcome = match provider.llm(tools) {
+                Err(text) => Err(FallbackReason::Error(text)),
+                Ok(llm) => {
+                    let call = llm.generate(messages);
+                    let outcome = match self.timeout {
+                        Some(limit) => match tokio::time::timeout(limit, call).await {
+                            Ok(result) => result.map_err(|e| e.to_string()).map_err(Ok),
+                            Err(_) => Err(Err(FallbackReason::Timeout)),
+                        },
+                        None => call.await.map_err(|e| e.to_string()).map_err(Ok),
+                    };
+                    outcome.map_err(|e| match e {
+                        Ok(text) => classify(provider.redact(text)),
+                        Err(reason) => reason,
+                    })
+                }
             };
             let reason = match outcome {
                 Ok(result) => return Ok(result),

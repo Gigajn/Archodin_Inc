@@ -43,6 +43,9 @@ use futures::stream::{self, BoxStream, StreamExt};
 mod roster;
 pub use roster::{branch_name, Agent, Role, Roster, RosterError};
 
+mod vault;
+pub use vault::{Secret, Vault, VaultError};
+
 mod agent;
 mod chain;
 pub use agent::{AgentError, AgentNode, AgentTool, Provider, TypedTool};
