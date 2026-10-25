@@ -208,18 +208,31 @@ impl AgentNode {
 
     /// Answers `request`, calling Tools as the model asks.
     pub async fn answer(&self, request: &str) -> Result<String, AgentError> {
+        self.converse(&[], request).await.map(|(answer, _)| answer)
+    }
+
+    /// Answers `request` after the earlier turns in `history`, and returns the
+    /// answer with the turns this call added (the request and the answer).
+    pub(crate) async fn converse(
+        &self,
+        history: &[Message],
+        request: &str,
+    ) -> Result<(String, Vec<Message>), AgentError> {
         let mut current = 0;
-        let mut messages = vec![
-            Message::new_system_message(&self.instructions),
-            Message::new_human_message(request),
-        ];
+        let mut messages = vec![Message::new_system_message(&self.instructions)];
+        messages.extend_from_slice(history);
+        messages.push(Message::new_human_message(request));
         for _ in 0..MAX_ROUNDS {
             let result = self
                 .chain
                 .generate(&mut current, &self.tools, &messages, self.on_event.as_ref())
                 .await?;
             if result.tool_calls.is_empty() {
-                return Ok(result.generation);
+                let turns = vec![
+                    Message::new_human_message(request),
+                    Message::new_ai_message(&result.generation),
+                ];
+                return Ok((result.generation, turns));
             }
             messages.push(Message::new_ai_message_with_tool_calls(
                 &result.generation,

@@ -73,6 +73,17 @@ impl ModelChain {
         }
     }
 
+    /// A chain of `pairs` in order, or `None` when there are none.
+    pub fn from_pairs(pairs: Vec<Provider>) -> Option<Self> {
+        if pairs.is_empty() {
+            return None;
+        }
+        Some(Self {
+            pairs,
+            timeout: None,
+        })
+    }
+
     /// Appends the next pair to try.
     pub fn then(mut self, next: Provider) -> Self {
         self.pairs.push(next);

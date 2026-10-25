@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use archodin::graph::{AgentNode, ChainEvent, FallbackReason, Graph, ModelChain, Provider};
+use archodin::graph::{
+    AgentNode, ChainEvent, FallbackReason, Graph, ModelChain, Provider, Role, Roster,
+};
 use mockito::{Server, ServerGuard};
 use serde_json::json;
 
@@ -200,4 +202,39 @@ async fn when_every_pair_fails_the_error_reaches_the_state_writer() {
     let out = graph.run(job()).await.unwrap();
     assert!(matches!(out.answer, Some(Err(_))));
     assert_eq!(log.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_hired_agent_falls_back_along_its_roles_chain() {
+    let (broken, _m1) = replying(500, "{}".into()).await;
+    let (good, _m2) = replying(200, completion("role fallback")).await;
+    let roster = Roster::new();
+    roster.add_role(
+        Role::new("writer", "Be brief")
+            .model_chain(vec![account(&broken, "a", "m1"), account(&good, "b", "m2")]),
+    );
+    let agent = roster.hire("writer", "Ines").unwrap();
+    let log: Log = Arc::default();
+    let sink = log.clone();
+    agent.on_event(move |e| sink.lock().unwrap().push(e));
+    assert_eq!(agent.ask("hi").await.unwrap(), "role fallback");
+    let events = log.lock().unwrap().clone();
+    let [ChainEvent::Fallback { failed, chosen, .. }] = &events[..] else {
+        panic!("expected one fallback, got {events:?}")
+    };
+    assert_eq!((failed.account(), chosen.account()), ("a", "b"));
+}
+
+#[tokio::test]
+async fn a_per_agent_override_chain_falls_back_too() {
+    let (broken, _m1) = replying(429, rate_limit_body()).await;
+    let (good, _m2) = replying(200, completion("override fallback")).await;
+    let (unused, m3) = replying(200, completion("role chain")).await;
+    let m3 = m3.expect(0);
+    let roster = Roster::new();
+    roster.add_role(Role::new("writer", "Be brief").model_chain(vec![account(&unused, "r", "m")]));
+    let agent = roster.hire("writer", "Ines").unwrap();
+    agent.set_model_chain(vec![account(&broken, "x", "m"), account(&good, "y", "m")]);
+    assert_eq!(agent.ask("hi").await.unwrap(), "override fallback");
+    m3.assert_async().await;
 }
