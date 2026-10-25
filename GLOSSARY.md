@@ -39,5 +39,23 @@ An Agent whose job is to split a task and pass the pieces to other Agents, built
 _Avoid_: Manager, orchestrator, coordinator
 
 **Handoff**:
-One Agent passing control of the conversation to another Agent.
+One Agent passing control of the conversation to another Agent, together with a Briefing rather than the raw history.
 _Avoid_: Transfer, delegation, routing
+
+**Briefing**:
+The condensed context an Agent receives on a Handoff, kept small so the full history does not fill its context window.
+_Avoid_: Summary, context dump
+
+**Step limit**:
+The most Node executions one Graph run may take before it stops (default 25).
+_Avoid_: Recursion limit, max iterations
+
+**Checkpoint**:
+A saved copy of the State after a step, from which a run can resume or wait for a person's approval.
+_Avoid_: Snapshot, savepoint
+
+## Learning
+
+**Skill**:
+Procedural knowledge an Agent writes down from experience and refines with use, then reuses on later tasks.
+_Avoid_: Prompt, recipe, playbook
