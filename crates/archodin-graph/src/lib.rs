@@ -1,11 +1,12 @@
 //! Archodin Graph orchestration (ADR 0002).
 //!
-//! A [`Graph`] is built from [`Node`]s that all read and update one typed State.
+//! A [`Graph`] is built from Nodes that all read and update one typed State.
 //! Running it for a person's request is a Job: [`Graph::stream`] yields the
 //! [`JobEvent`]s of the run in order, and [`Graph::run`] returns the final State.
 //!
-//! This first slice supports a single plain-function Node; Edges, the Step limit
-//! and Checkpoints arrive with later tickets.
+//! Nodes are joined by Edges, some conditional (they pick the next Node from the
+//! State). A Job stops at the Step limit (default 25, settable per run).
+//! Checkpoints arrive with a later ticket.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,8 +15,23 @@ use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 
 type NodeFn<S> = Arc<dyn Fn(S) -> BoxFuture<'static, S> + Send + Sync>;
+type RouterFn<S> = Arc<dyn Fn(&S) -> &'static str + Send + Sync>;
 
-/// Why a Graph could not be built.
+/// The Step limit used when a run does not set one.
+pub const DEFAULT_STEP_LIMIT: usize = 25;
+
+/// Edge target meaning "the Job ends here".
+pub const END: &str = "__end__";
+
+enum Edge<S> {
+    To(String),
+    Conditional {
+        router: RouterFn<S>,
+        targets: Vec<String>,
+    },
+}
+
+/// Why a Graph could not be built, or a Job could not finish.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GraphError {
     /// No entry Node was set.
@@ -24,6 +40,15 @@ pub enum GraphError {
     /// The entry Node name does not match any Node.
     #[error("unknown entry node `{0}`")]
     UnknownEntry(String),
+    /// An Edge starts or ends at a Node that does not exist.
+    #[error("edge refers to unknown node `{0}`")]
+    UnknownEdgeNode(String),
+    /// A Node has more than one outgoing Edge.
+    #[error("node `{0}` has more than one outgoing edge")]
+    DuplicateEdge(String),
+    /// The Job was stopped after `limit` Node executions with work still pending.
+    #[error("step limit reached after {limit} steps")]
+    StepLimitReached { limit: usize },
 }
 
 /// What happened during a Job, in the order it happened.
@@ -37,11 +62,43 @@ pub enum JobEvent<S> {
     NodeFinished { node: String },
     /// The Job ended; `state` is the final State.
     JobFinished { state: S },
+    /// The Job stopped because it hit the Step limit; `state` is the State so far.
+    StepLimitReached { limit: usize, state: S },
+}
+
+/// Settings for one run, such as its Step limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunOptions {
+    step_limit: usize,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            step_limit: DEFAULT_STEP_LIMIT,
+        }
+    }
+}
+
+impl RunOptions {
+    /// Options with the default Step limit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the most Node executions the run may take.
+    pub fn step_limit(mut self, limit: usize) -> Self {
+        self.step_limit = limit;
+        self
+    }
 }
 
 /// Builds a [`Graph`].
 pub struct GraphBuilder<S> {
     nodes: HashMap<String, NodeFn<S>>,
+    edges: HashMap<String, Edge<S>>,
+    edge_order: Vec<String>,
+    duplicate_edge: Option<String>,
     entry: Option<String>,
 }
 
@@ -63,31 +120,92 @@ impl<S: Send + 'static> GraphBuilder<S> {
         self
     }
 
+    /// Adds an Edge from `from` to `to`; `to` may be [`END`].
+    pub fn edge(self, from: &str, to: &str) -> Self {
+        self.add_edge(from, Edge::To(to.to_string()))
+    }
+
+    /// Adds a conditional Edge: after `from`, `router` reads the State and names the
+    /// next Node. `targets` lists every name the router may return ([`END`] included).
+    ///
+    /// # Panics
+    /// A run panics if `router` returns a name not listed in `targets`.
+    pub fn conditional_edge<R>(self, from: &str, router: R, targets: &[&str]) -> Self
+    where
+        R: Fn(&S) -> &'static str + Send + Sync + 'static,
+    {
+        self.add_edge(
+            from,
+            Edge::Conditional {
+                router: Arc::new(router),
+                targets: targets.iter().map(|t| t.to_string()).collect(),
+            },
+        )
+    }
+
+    fn add_edge(mut self, from: &str, edge: Edge<S>) -> Self {
+        if self.edges.insert(from.to_string(), edge).is_some() {
+            self.duplicate_edge.get_or_insert(from.to_string());
+        }
+        self.edge_order.push(from.to_string());
+        self
+    }
+
     /// Validates and builds the Graph.
     pub fn build(self) -> Result<Graph<S>, GraphError> {
         let entry = self.entry.ok_or(GraphError::NoEntry)?;
         if !self.nodes.contains_key(&entry) {
             return Err(GraphError::UnknownEntry(entry));
         }
+        if let Some(dup) = self.duplicate_edge {
+            return Err(GraphError::DuplicateEdge(dup));
+        }
+        let known = |n: &str| n == END || self.nodes.contains_key(n);
+        for from in &self.edge_order {
+            if !self.nodes.contains_key(from) {
+                return Err(GraphError::UnknownEdgeNode(from.clone()));
+            }
+            let targets: &[String] = match &self.edges[from] {
+                Edge::To(t) => std::slice::from_ref(t),
+                Edge::Conditional { targets, .. } => targets,
+            };
+            if let Some(bad) = targets.iter().find(|t| !known(t)) {
+                return Err(GraphError::UnknownEdgeNode(bad.clone()));
+            }
+        }
         Ok(Graph {
-            nodes: self.nodes,
-            entry,
+            inner: Arc::new(Inner {
+                nodes: self.nodes,
+                edges: self.edges,
+                entry,
+            }),
         })
     }
 }
 
+struct Inner<S> {
+    nodes: HashMap<String, NodeFn<S>>,
+    edges: HashMap<String, Edge<S>>,
+    entry: String,
+}
+
 /// Nodes over one shared State, ready to run Jobs.
 pub struct Graph<S> {
-    nodes: HashMap<String, NodeFn<S>>,
-    entry: String,
+    inner: Arc<Inner<S>>,
 }
 
 enum Phase<S> {
     Start(S),
-    NodeStart(S),
-    NodeEnd(S),
+    Enter(S, String),
+    Exec(S, String),
+    Leave(S, String),
     Finish(S),
     Done,
+}
+
+struct Run<S> {
+    phase: Phase<S>,
+    steps: usize,
 }
 
 impl<S: Clone + Send + 'static> Graph<S> {
@@ -95,46 +213,107 @@ impl<S: Clone + Send + 'static> Graph<S> {
     pub fn builder() -> GraphBuilder<S> {
         GraphBuilder {
             nodes: HashMap::new(),
+            edges: HashMap::new(),
+            edge_order: Vec::new(),
+            duplicate_edge: None,
             entry: None,
         }
     }
 
-    /// Runs a Job from `initial` and streams its events; the last one carries the final State.
+    /// Runs a Job from `initial` with the default Step limit and streams its events.
     pub fn stream(&self, initial: S) -> BoxStream<'static, JobEvent<S>> {
-        let node_name = self.entry.clone();
-        let node = self.nodes[&self.entry].clone();
-        stream::unfold(Phase::Start(initial), move |phase| {
-            let node_name = node_name.clone();
-            let node = node.clone();
+        self.stream_with(initial, RunOptions::default())
+    }
+
+    /// Runs a Job from `initial` with `options` and streams its events; the last one
+    /// is [`JobEvent::JobFinished`] or [`JobEvent::StepLimitReached`].
+    pub fn stream_with(&self, initial: S, options: RunOptions) -> BoxStream<'static, JobEvent<S>> {
+        let inner = self.inner.clone();
+        let limit = options.step_limit;
+        let run = Run {
+            phase: Phase::Start(initial),
+            steps: 0,
+        };
+        stream::unfold(run, move |run| {
+            let inner = inner.clone();
             async move {
-                match phase {
-                    Phase::Start(s) => Some((JobEvent::JobStarted, Phase::NodeStart(s))),
-                    Phase::NodeStart(s) => {
-                        Some((JobEvent::NodeStarted { node: node_name }, Phase::NodeEnd(s)))
+                let Run { phase, steps } = run;
+                let (event, phase, steps) = match phase {
+                    Phase::Start(s) => (
+                        Some(JobEvent::JobStarted),
+                        Phase::Enter(s, inner.entry.clone()),
+                        steps,
+                    ),
+                    Phase::Enter(s, _) if steps >= limit => (
+                        Some(JobEvent::StepLimitReached { limit, state: s }),
+                        Phase::Done,
+                        steps,
+                    ),
+                    Phase::Enter(s, node) => (
+                        Some(JobEvent::NodeStarted { node: node.clone() }),
+                        Phase::Exec(s, node),
+                        steps + 1,
+                    ),
+                    Phase::Exec(s, node) => {
+                        let updated = (inner.nodes[&node])(s).await;
+                        (
+                            Some(JobEvent::NodeFinished { node: node.clone() }),
+                            Phase::Leave(updated, node),
+                            steps,
+                        )
                     }
-                    Phase::NodeEnd(s) => {
-                        let updated = node(s).await;
-                        Some((
-                            JobEvent::NodeFinished { node: node_name },
-                            Phase::Finish(updated),
-                        ))
+                    Phase::Leave(s, node) => {
+                        let next = match inner.edges.get(&node) {
+                            None => END,
+                            Some(Edge::To(t)) => t.as_str(),
+                            Some(Edge::Conditional { router, targets }) => {
+                                let chosen = router(&s);
+                                assert!(
+                                    targets.iter().any(|t| t == chosen),
+                                    "conditional edge from `{node}` returned undeclared target `{chosen}`"
+                                );
+                                chosen
+                            }
+                        };
+                        let phase = if next == END {
+                            Phase::Finish(s)
+                        } else {
+                            Phase::Enter(s, next.to_string())
+                        };
+                        (None, phase, steps)
                     }
-                    Phase::Finish(s) => Some((JobEvent::JobFinished { state: s }, Phase::Done)),
-                    Phase::Done => None,
-                }
+                    Phase::Finish(s) => (
+                        Some(JobEvent::JobFinished { state: s }),
+                        Phase::Done,
+                        steps,
+                    ),
+                    Phase::Done => return None,
+                };
+                Some((event, Run { phase, steps }))
             }
         })
+        .filter_map(|e| async move { e })
         .boxed()
     }
 
-    /// Runs a Job from `initial` to the end and returns the final State.
+    /// Runs a Job with the default Step limit and returns the final State.
     pub async fn run(&self, initial: S) -> Result<S, GraphError> {
-        let mut events = self.stream(initial);
+        self.run_with(initial, RunOptions::default()).await
+    }
+
+    /// Runs a Job with `options`; a Job that hits the Step limit returns
+    /// [`GraphError::StepLimitReached`].
+    pub async fn run_with(&self, initial: S, options: RunOptions) -> Result<S, GraphError> {
+        let mut events = self.stream_with(initial, options);
         while let Some(event) = events.next().await {
-            if let JobEvent::JobFinished { state } = event {
-                return Ok(state);
+            match event {
+                JobEvent::JobFinished { state } => return Ok(state),
+                JobEvent::StepLimitReached { limit, .. } => {
+                    return Err(GraphError::StepLimitReached { limit })
+                }
+                _ => {}
             }
         }
-        unreachable!("a Job stream always ends with JobFinished")
+        unreachable!("a Job stream always ends with JobFinished or StepLimitReached")
     }
 }
