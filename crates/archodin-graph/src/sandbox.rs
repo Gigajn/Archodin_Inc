@@ -137,6 +137,76 @@ impl SandboxPolicy {
 pub trait Sandbox: Send + Sync {
     /// Runs `command` with `sh -c` inside the Sandbox.
     fn run<'a>(&'a self, command: &'a str) -> BoxFuture<'a, Result<SandboxOutput, SandboxError>>;
+
+    /// Puts `files` (relative path and content) in the Sandbox's working
+    /// directory so later commands can see them, replacing earlier staged files.
+    /// Sandboxes that cannot stage files refuse.
+    fn stage<'a>(
+        &'a self,
+        files: &'a [(String, String)],
+    ) -> BoxFuture<'a, Result<(), SandboxError>> {
+        let _ = files;
+        Box::pin(async {
+            Err(SandboxError::Runtime(
+                "this Sandbox cannot stage files".into(),
+            ))
+        })
+    }
+}
+
+/// A throwaway host directory holding staged files, removed when dropped.
+#[derive(Debug)]
+struct StageDir(std::path::PathBuf);
+
+impl Drop for StageDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn write_staged(files: &[(String, String)]) -> Result<StageDir, SandboxError> {
+    use std::path::{Component, Path};
+    let fail = |e: std::io::Error| SandboxError::Runtime(format!("staging files: {e}"));
+    let dir = StageDir(std::env::temp_dir().join(format!(
+        "archodin-stage-{}-{}",
+        std::process::id(),
+        CONTAINER_SEQ.fetch_add(1, Ordering::Relaxed)
+    )));
+    std::fs::create_dir_all(&dir.0).map_err(fail)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // The container runs as an unprivileged user that must write here.
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o777)).map_err(fail)?;
+    }
+    for (path, content) in files {
+        let relative = Path::new(path);
+        let safe = !path.is_empty()
+            && relative
+                .components()
+                .all(|c| matches!(c, Component::Normal(_)));
+        if !safe {
+            return Err(SandboxError::Runtime(format!(
+                "cannot stage `{path}`: the path must be relative and stay inside the Sandbox"
+            )));
+        }
+        let target = dir.0.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(fail)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut p = parent;
+                while p.starts_with(&dir.0) && p != dir.0 {
+                    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o777))
+                        .map_err(fail)?;
+                    p = p.parent().expect("inside the stage directory");
+                }
+            }
+        }
+        std::fs::write(&target, content).map_err(fail)?;
+    }
+    Ok(dir)
 }
 
 static CONTAINER_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -147,6 +217,7 @@ const MAX_STREAM_BYTES: usize = 64 * 1024;
 pub struct ContainerSandbox {
     runtime: String,
     policy: SandboxPolicy,
+    staged: Arc<Mutex<Option<Arc<StageDir>>>>,
 }
 
 impl ContainerSandbox {
@@ -163,6 +234,7 @@ impl ContainerSandbox {
         Self {
             runtime: runtime.into(),
             policy,
+            staged: Arc::new(Mutex::new(None)),
         }
     }
     /// The runtime CLI in use.
@@ -171,7 +243,9 @@ impl ContainerSandbox {
     }
 
     /// The arguments given to the runtime to run `command` in a container
-    /// called `name`. There are no mounts and no environment variables.
+    /// called `name`. There are no environment variables, and no mounts except
+    /// the throwaway directory of files given to [`Sandbox::stage`] (at `/work`,
+    /// which is where commands start): never host files or secrets.
     pub fn run_args(&self, name: &str, command: &str) -> Vec<String> {
         let p = &self.policy;
         let mem = format!("{}m", p.memory_mb);
@@ -197,6 +271,19 @@ impl ContainerSandbox {
             ]
             .map(String::from),
         );
+        if let Some(dir) = self
+            .staged
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            args.extend([
+                "--volume".to_string(),
+                format!("{}:/work:rw", dir.0.display()),
+                "--workdir".to_string(),
+                "/work".to_string(),
+            ]);
+        }
         args.push(p.image.clone());
         args.extend(["sh", "-c", command].map(String::from));
         args
@@ -225,6 +312,17 @@ async fn read_capped(mut r: impl tokio::io::AsyncRead + Unpin) -> String {
 }
 
 impl Sandbox for ContainerSandbox {
+    fn stage<'a>(
+        &'a self,
+        files: &'a [(String, String)],
+    ) -> BoxFuture<'a, Result<(), SandboxError>> {
+        Box::pin(async move {
+            let dir = write_staged(files)?;
+            *self.staged.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(dir));
+            Ok(())
+        })
+    }
+
     fn run<'a>(&'a self, command: &'a str) -> BoxFuture<'a, Result<SandboxOutput, SandboxError>> {
         Box::pin(async move {
             let name = format!(
@@ -281,6 +379,7 @@ impl Sandbox for ContainerSandbox {
 pub struct ScriptedSandbox {
     results: Mutex<VecDeque<Result<SandboxOutput, SandboxError>>>,
     commands: Mutex<Vec<String>>,
+    staged: Mutex<Vec<(String, String)>>,
 }
 
 impl ScriptedSandbox {
@@ -289,7 +388,15 @@ impl ScriptedSandbox {
         Self {
             results: Mutex::new(results.into_iter().collect()),
             commands: Mutex::new(Vec::new()),
+            staged: Mutex::new(Vec::new()),
         }
+    }
+    /// The files staged so far.
+    pub fn staged(&self) -> Vec<(String, String)> {
+        self.staged
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
     /// The commands run so far, in order.
     pub fn commands(&self) -> Vec<String> {
@@ -301,6 +408,14 @@ impl ScriptedSandbox {
 }
 
 impl Sandbox for ScriptedSandbox {
+    fn stage<'a>(
+        &'a self,
+        files: &'a [(String, String)],
+    ) -> BoxFuture<'a, Result<(), SandboxError>> {
+        *self.staged.lock().unwrap_or_else(|e| e.into_inner()) = files.to_vec();
+        Box::pin(async { Ok(()) })
+    }
+
     fn run<'a>(&'a self, command: &'a str) -> BoxFuture<'a, Result<SandboxOutput, SandboxError>> {
         Box::pin(async move {
             self.commands
