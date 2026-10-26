@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agora</title>
+<style>
+body { font: 16px/1.4 system-ui, sans-serif; margin: 0 auto; max-width: 60rem; padding: 1rem; }
+section { border: 1px solid #8884; border-radius: .5rem; padding: .75rem 1rem; margin: 1rem 0; }
+textarea, input { width: 100%; box-sizing: border-box; margin: .25rem 0; font: inherit; }
+pre { white-space: pre-wrap; max-height: 16rem; overflow: auto; background: #8881; padding: .5rem; }
+button { font: inherit; margin-right: .25rem; }
+.dim { opacity: .7 }
+</style>
+</head>
+<body>
+<h1>Agora</h1>
+
+<section>
+<h2>Submit a Job</h2>
+<form id="submit">
+<textarea name="request" rows="3" placeholder="What should be done?" required></textarea>
+<input name="role" placeholder="Role (optional)">
+<input name="links" placeholder="Links, separated by spaces">
+<input name="github_url" placeholder="GitHub URL (optional)">
+<input name="files" type="file" multiple>
+<button>Submit</button> <span id="error" class="dim"></span>
+</form>
+</section>
+
+<section><h2>Jobs</h2><div id="jobs"></div><pre id="log" class="dim">Pick a Job to follow its events.</pre></section>
+<section><h2>Approvals</h2><div id="approvals"></div></section>
+<section><h2>Usage</h2><div id="usage"></div></section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const post = (url, body) => fetch(url, {
+  method: "POST",
+  headers: body ? {"content-type": "application/json"} : {},
+  body: body ? JSON.stringify(body) : undefined,
+});
+const el = (tag, text, attrs = {}) => Object.assign(document.createElement(tag), {textContent: text, ...attrs});
+let source = null;
+
+function follow(id) {
+  if (source) source.close();
+  $("log").textContent = "";
+  source = new EventSource(`/api/jobs/${id}/events`);
+  const types = ["job_started","node_started","node_finished","conflict","decision","job_finished",
+    "job_paused","job_rejected","step_limit_reached","cancelled","resumed"];
+  for (const t of types) source.addEventListener(t, (e) => {
+    $("log").textContent += `${t} ${e.data}\n`;
+    refresh();
+  });
+}
+
+$("submit").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  const files = [];
+  for (const file of $("submit").elements.files.files) files.push({name: file.name, content: await file.text()});
+  const res = await post("/api/jobs", {
+    request: f.get("request"),
+    role: f.get("role") || null,
+    links: f.get("links").split(/\s+/).filter(Boolean),
+    github_url: f.get("github_url") || null,
+    files,
+  });
+  if (res.ok) { ev.target.reset(); $("error").textContent = ""; follow((await res.json()).id); }
+  else $("error").textContent = await res.text();
+  refresh();
+});
+
+async function refresh() {
+  const jobs = await (await fetch("/api/jobs")).json();
+  $("jobs").replaceChildren(...jobs.map((j) => {
+    const row = el("div", `#${j.id} [${j.status}] ${j.request} (${j.total_tokens} tokens, cost ${j.cost}) `);
+    row.append(el("button", "Follow", {onclick: () => follow(j.id)}));
+    if (["queued","running","paused"].includes(j.status))
+      row.append(el("button", "Cancel", {onclick: async () => { await post(`/api/jobs/${j.id}/cancel`); refresh(); }}));
+    return row;
+  }));
+
+  const groups = await (await fetch("/api/approvals")).json();
+  $("approvals").replaceChildren(...groups.map((g) => {
+    const box = el("div");
+    const head = el("h3", g.role + " ");
+    head.append(el("button", "Approve all", {onclick: async () => { await post(`/api/roles/${encodeURIComponent(g.role)}/approve-all`); refresh(); }}));
+    box.append(head);
+    for (const i of g.items) {
+      const row = el("div", `${i.kind}: ${i.prompt}${i.unverified ? " (unverified)" : ""} `);
+      if (i.summary) row.append(el("div", i.summary, {className: "dim"}));
+      row.append(el("button", "Approve", {onclick: async () => { await post(`/api/approvals/${i.id}/approve`); refresh(); }}));
+      row.append(el("button", "Reject", {onclick: async () => { await post(`/api/approvals/${i.id}/reject`); refresh(); }}));
+      box.append(row);
+    }
+    return box;
+  }));
+
+  const u = await (await fetch("/api/usage")).json();
+  $("usage").replaceChildren(
+    ...u.agents.map((a) => el("div", `Agent ${a.name}: ${a.total_tokens} tokens, cost ${a.cost}`)),
+    ...u.jobs.map((j) => el("div", `Job #${j.id}: ${j.total_tokens} tokens, cost ${j.cost}`)));
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+[package]
+name = "archodin-console"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-Proprietary"
+publish = false
+description = "The Agora: Archodin's web console for submitting Jobs, following them and approving"
+
+[dependencies]
+archodin-graph = { path = "../archodin-graph" }
+axum = "0.8"
+futures = "0.3.31"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
