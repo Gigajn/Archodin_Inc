@@ -211,12 +211,22 @@ impl Nakama {
         proposals: Vec<Proposal>,
         approver: &dyn Approver,
     ) -> Vec<Proposal> {
+        let prompted = proposals.into_iter().map(|p| (p.describe(), p)).collect();
+        self.resolve_prompted(roster, prompted, approver).await
+    }
+
+    pub(crate) async fn resolve_prompted(
+        &self,
+        roster: &Roster,
+        proposals: Vec<(String, Proposal)>,
+        approver: &dyn Approver,
+    ) -> Vec<Proposal> {
         let mut applied = Vec::new();
-        for proposal in proposals {
+        for (prompt, proposal) in proposals {
             let request = ApprovalRequest {
                 job: "nakama".into(),
                 node: proposal.node().into(),
-                prompt: proposal.describe(),
+                prompt,
             };
             let decision = approver.decide(&request).await;
             if let Proposal::Hire { agent, .. } = &proposal {

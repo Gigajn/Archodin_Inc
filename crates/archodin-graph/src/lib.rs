@@ -43,6 +43,9 @@ use futures::stream::{self, BoxStream, StreamExt};
 mod nakama;
 pub use nakama::{Nakama, Proposal, Workload};
 
+mod performance;
+pub use performance::{AgentFigures, CitedProposal, PerformanceLedger, PerformanceReport};
+
 mod roster;
 pub use roster::{branch_name, Agent, Role, Roster, RosterError};
 
