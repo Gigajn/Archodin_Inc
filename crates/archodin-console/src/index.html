@@ -89,6 +89,8 @@ async function refresh() {
     box.append(head);
     for (const i of g.items) {
       const row = el("div", `${i.kind}: ${i.prompt}${i.unverified ? " (unverified)" : ""} `);
+      row.id = `approval-${i.id}`;
+      if (location.pathname === `/approvals/${i.id}`) row.style.outline = "2px solid";
       if (i.summary) row.append(el("div", i.summary, {className: "dim"}));
       row.append(el("button", "Approve", {onclick: async () => { await post(`/api/approvals/${i.id}/approve`); refresh(); }}));
       row.append(el("button", "Reject", {onclick: async () => { await post(`/api/approvals/${i.id}/reject`); refresh(); }}));
@@ -102,7 +104,11 @@ async function refresh() {
     ...u.agents.map((a) => el("div", `Agent ${a.name}: ${a.total_tokens} tokens, cost ${a.cost}`)),
     ...u.jobs.map((j) => el("div", `Job #${j.id}: ${j.total_tokens} tokens, cost ${j.cost}`)));
 }
-refresh();
+refresh().then(() => {
+  const m = location.pathname.match(/^\/approvals\/(\d+)$/);
+  const row = m && document.getElementById(`approval-${m[1]}`);
+  if (row) row.scrollIntoView();
+});
 setInterval(refresh, 5000);
 </script>
 </body>

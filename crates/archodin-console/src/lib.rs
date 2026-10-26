@@ -13,7 +13,9 @@
 //! the [`JobSink`] so they appear live.
 //!
 //! Routes (see [`Agora::router`]):
-//! - `GET /` the page
+//! - `GET /` the page, `GET /approvals/{id}` the same page opened at one approval
+//!   (the deep link in notifications)
+//! - `GET|POST /login`, `POST /logout` (when [`AgoraBuilder::auth`] is set)
 //! - `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}`
 //! - `GET /api/jobs/{id}/events` server-sent events, replayed from the start
 //! - `POST /api/jobs/{id}/cancel`
@@ -21,11 +23,26 @@
 //! - `POST /api/approvals/{id}/approve|reject`
 //! - `POST /api/roles/{role}/approve-all|reject-all`
 //! - `GET /api/usage` token use and cost per Agent and per Job
+//!
+//! With [`AgoraBuilder::auth`] every route, including unknown paths, needs a login
+//! session (cookie or bearer token, see [`Auth`]). Without it the router is open,
+//! which is only for tests and trusted local use.
+//!
+//! With [`AgoraBuilder::notifier`] a new pending approval is sent to the person by
+//! Telegram or email, with a link to it; approvals that arrive within the
+//! [`notify_window`](AgoraBuilder::notify_window) share one message.
+
+mod auth;
+mod notify;
+
+pub use auth::{hash_password, Auth, AuthError};
+pub use notify::{EmailNotifier, Mailer, Notification, Notifier, NotifyError, TelegramNotifier};
 
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use archodin_graph::{
     ApprovalDecision, ApprovalRequest, Approver, JobEvent, JobOrigin, JobQueue, McpLibrary,
@@ -276,6 +293,19 @@ struct Inner {
     mcp: Option<McpLibrary>,
     agents: Vec<String>,
     max_running: usize,
+    auth: Option<Auth>,
+    notifiers: Vec<Arc<dyn Notifier>>,
+    notify_window: Duration,
+    public_url: String,
+    notes: Mutex<Notes>,
+}
+
+/// Approvals waiting to be announced, and the last notification failure.
+#[derive(Default)]
+struct Notes {
+    batch: Vec<u64>,
+    scheduled: bool,
+    last_error: Option<String>,
 }
 
 /// The Agora. Clones share the same console.
@@ -292,6 +322,10 @@ pub struct AgoraBuilder {
     mcp: Option<McpLibrary>,
     agents: Vec<String>,
     max_running: usize,
+    auth: Option<Auth>,
+    notifiers: Vec<Arc<dyn Notifier>>,
+    notify_window: Duration,
+    public_url: String,
 }
 
 impl AgoraBuilder {
@@ -335,6 +369,33 @@ impl AgoraBuilder {
         self
     }
 
+    /// Requires a login session on every page and API call.
+    pub fn auth(mut self, auth: Auth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// Adds a way to notify the person of new pending approvals. Add several (for
+    /// example Telegram and email) and each gets every notification.
+    pub fn notifier(mut self, notifier: Arc<dyn Notifier>) -> Self {
+        self.notifiers.push(notifier);
+        self
+    }
+
+    /// How long to wait after the first new approval before notifying, so a burst
+    /// becomes one message (default 30 seconds).
+    pub fn notify_window(mut self, window: Duration) -> Self {
+        self.notify_window = window;
+        self
+    }
+
+    /// The address people reach the Agora at, used for links in notifications. Leave
+    /// it out and the links are paths such as `/approvals/3`.
+    pub fn public_url(mut self, url: impl Into<String>) -> Self {
+        self.public_url = url.into().trim_end_matches('/').to_string();
+        self
+    }
+
     /// Builds the Agora.
     ///
     /// # Panics
@@ -357,6 +418,11 @@ impl AgoraBuilder {
                 mcp: self.mcp,
                 agents: self.agents,
                 max_running: self.max_running,
+                auth: self.auth,
+                notifiers: self.notifiers,
+                notify_window: self.notify_window,
+                public_url: self.public_url,
+                notes: Mutex::new(Notes::default()),
             }),
         }
     }
@@ -384,6 +450,10 @@ impl Agora {
             mcp: None,
             agents: Vec::new(),
             max_running: 4,
+            auth: None,
+            notifiers: Vec::new(),
+            notify_window: Duration::from_secs(30),
+            public_url: String::new(),
         }
     }
 
@@ -689,8 +759,9 @@ impl Agora {
 
     /// The axum router serving the page and the API.
     pub fn router(&self) -> Router {
-        Router::new()
+        let router = Router::new()
             .route("/", get(index))
+            .route("/approvals/{id}", get(index))
             .route("/api/jobs", post(submit_job).get(list_jobs))
             .route("/api/jobs/{id}", get(get_job))
             .route("/api/jobs/{id}/events", get(job_events))
@@ -701,7 +772,95 @@ impl Agora {
             .route("/api/roles/{role}/approve-all", post(approve_role))
             .route("/api/roles/{role}/reject-all", post(reject_role))
             .route("/api/usage", get(usage))
-            .with_state(self.clone())
+            .with_state(self.clone());
+        match &self.inner.auth {
+            Some(auth) => auth.protect(router),
+            None => router,
+        }
+    }
+
+    /// The last reason a notification failed to send, if any did.
+    pub fn last_notification_error(&self) -> Option<String> {
+        lock(&self.inner.notes).last_error.clone()
+    }
+
+    /// Asks the Skill and MCP libraries about everything pending, so new ones are
+    /// listed (and announced) without waiting for someone to open the page. Call it
+    /// now and then from the application.
+    pub async fn refresh(&self) {
+        self.sync().await;
+    }
+
+    fn announce(&self, id: u64) {
+        if self.inner.notifiers.is_empty() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        {
+            let mut notes = lock(&self.inner.notes);
+            notes.batch.push(id);
+            if notes.scheduled {
+                return;
+            }
+            notes.scheduled = true;
+        }
+        let agora = self.clone();
+        runtime.spawn(async move {
+            tokio::time::sleep(agora.inner.notify_window).await;
+            agora.flush_notifications().await;
+        });
+    }
+
+    async fn flush_notifications(&self) {
+        let ids = {
+            let mut notes = lock(&self.inner.notes);
+            notes.scheduled = false;
+            std::mem::take(&mut notes.batch)
+        };
+        // Skip what was answered or cancelled while the window was open.
+        let waiting: Vec<(u64, &'static str, String, String)> = {
+            let s = lock(&self.inner.state);
+            ids.iter()
+                .filter_map(|id| s.approvals.get(id))
+                .map(|a| (a.id, a.kind, a.role.clone(), a.key.2.clone()))
+                .collect()
+        };
+        if waiting.is_empty() {
+            return;
+        }
+        let notification = self.compose(&waiting);
+        for notifier in &self.inner.notifiers {
+            if let Err(e) = notifier.send(&notification).await {
+                lock(&self.inner.notes).last_error = Some(e.to_string());
+            }
+        }
+    }
+
+    fn compose(&self, waiting: &[(u64, &'static str, String, String)]) -> Notification {
+        const SHOWN: usize = 10;
+        let base = &self.inner.public_url;
+        let subject = match waiting {
+            [(_, kind, role, _)] => format!("Approval waiting: {kind} for {role}"),
+            _ => format!("{} approvals waiting", waiting.len()),
+        };
+        let mut body = String::new();
+        for (id, kind, role, prompt) in waiting.iter().take(SHOWN) {
+            let prompt = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+            let prompt: String = if prompt.chars().count() > 160 {
+                prompt.chars().take(160).chain("...".chars()).collect()
+            } else {
+                prompt
+            };
+            body.push_str(&format!(
+                "- [{kind}, {role}] {prompt}\n  {base}/approvals/{id}\n"
+            ));
+        }
+        if waiting.len() > SHOWN {
+            body.push_str(&format!("...and {} more: {base}/\n", waiting.len() - SHOWN));
+        }
+        Notification { subject, body }
     }
 }
 
@@ -713,6 +872,7 @@ impl Approver for Agora {
             request.prompt.clone(),
         );
         let (role, kind) = self.classify(request);
+        let mut new_approval = None;
         let decision = {
             let mut s = lock(&self.inner.state);
             if let Some(d) = s.decided.remove(&key) {
@@ -730,10 +890,14 @@ impl Approver for Agora {
                             kind,
                         },
                     );
+                    new_approval = Some(id);
                 }
                 ApprovalDecision::Pending
             }
         };
+        if let Some(id) = new_approval {
+            self.announce(id);
+        }
         if decision == ApprovalDecision::Pending {
             self.bump();
         }
