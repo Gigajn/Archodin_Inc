@@ -628,6 +628,9 @@ impl Agora {
         if let Some(role) = job.strip_prefix("mcp/") {
             return (role.to_string(), "mcp_server");
         }
+        if job == "forja" {
+            return ("forja".into(), "pull_request");
+        }
         if job == "nakama" {
             return ("nakama".into(), "nakama_proposal");
         }

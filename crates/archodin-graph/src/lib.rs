@@ -418,3 +418,5 @@ pub use ronin::{
     web_search, DuckDuckGoSearch, FoundSkill, GitHubSearch, Ronin, RoninError, Scouting,
     SearchEngine, SearchHit, SearxngSearch,
 };
+mod forja;
+pub use forja::{Forja, ForjaError, ForjaGitHub, ForjaPullRequest, ForjaWork};
