@@ -40,6 +40,13 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 
+mod explorador;
+pub use explorador::{
+    Charter, Contribution, Department, Explorador, ExploradorError, GitHub, GitHubCall,
+    GitHubClient, GitHubError, Issue, Opportunity, PullRequest, PullRequestDraft, RepoInfo,
+    RepoRef, ScriptedGitHub,
+};
+
 mod nakama;
 pub use nakama::{Nakama, Proposal, Workload};
 
