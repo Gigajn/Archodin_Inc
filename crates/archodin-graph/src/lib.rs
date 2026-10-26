@@ -423,3 +423,5 @@ mod upgrade;
 pub use upgrade::{
     DepartmentSetup, RunningJob, Upgrade, UpgradeCharter, UpgradeError, VersionedDepartment,
 };
+mod forja;
+pub use forja::{Forja, ForjaError, ForjaGitHub, ForjaPullRequest, ForjaWork};
