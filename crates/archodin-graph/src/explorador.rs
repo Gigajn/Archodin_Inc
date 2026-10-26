@@ -145,6 +145,17 @@ pub struct PullRequest {
     pub url: String,
 }
 
+/// A pull request that is still open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenPullRequest {
+    /// The pull request number.
+    pub number: u64,
+    /// The head branch.
+    pub head: String,
+    /// The description.
+    pub body: String,
+}
+
 /// Why a GitHub call failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GitHubError {
@@ -199,6 +210,27 @@ pub trait GitHub: Send + Sync {
         upstream: &RepoRef,
         draft: PullRequestDraft,
     ) -> BoxFuture<'_, Result<PullRequest, GitHubError>>;
+    /// Deletes `branch` of the person's repository `repo`.
+    fn delete_branch(&self, repo: &RepoRef, branch: &str)
+        -> BoxFuture<'_, Result<(), GitHubError>>;
+    /// Lists the open pull requests of `repo`.
+    fn open_pull_requests(
+        &self,
+        repo: &RepoRef,
+    ) -> BoxFuture<'_, Result<Vec<OpenPullRequest>, GitHubError>>;
+    /// Merges pull request `number` of `repo`. Only a person merges: Departments
+    /// are never given a GitHub that does (Forja's guard always refuses), so the
+    /// default is to not support it.
+    fn merge_pull_request(
+        &self,
+        repo: &RepoRef,
+        number: u64,
+    ) -> BoxFuture<'_, Result<(), GitHubError>> {
+        let err = GitHubError::Http(format!(
+            "merging pull request #{number} of {repo} is not supported"
+        ));
+        Box::pin(async move { Err(err) })
+    }
 }
 
 /// One call received by a [`ScriptedGitHub`].
@@ -239,6 +271,22 @@ pub enum GitHubCall {
         /// The pull request.
         draft: PullRequestDraft,
     },
+    /// `delete_branch`.
+    DeleteBranch {
+        /// The repository.
+        repo: RepoRef,
+        /// The deleted branch.
+        branch: String,
+    },
+    /// `open_pull_requests`.
+    OpenPullRequests(RepoRef),
+    /// `merge_pull_request`.
+    MergePullRequest {
+        /// The repository.
+        repo: RepoRef,
+        /// The pull request number.
+        number: u64,
+    },
 }
 
 impl GitHubCall {
@@ -252,6 +300,8 @@ impl GitHubCall {
 struct ScriptedGitHubState {
     repos: Vec<RepoInfo>,
     issues: Vec<Issue>,
+    pulls: Vec<OpenPullRequest>,
+    fail_commits: bool,
     calls: Vec<GitHubCall>,
 }
 
@@ -281,6 +331,18 @@ impl ScriptedGitHub {
     /// Adds an open issue (served for every repository).
     pub fn issue(self, issue: Issue) -> Self {
         self.state().issues.push(issue);
+        self
+    }
+
+    /// Adds an already open pull request (served for every repository).
+    pub fn open_pull_request_entry(self, pull: OpenPullRequest) -> Self {
+        self.state().pulls.push(pull);
+        self
+    }
+
+    /// Makes every `commit_file` fail, to test clean-up after a half-done push.
+    pub fn failing_commits(self) -> Self {
+        self.state().fail_commits = true;
         self
     }
 
@@ -353,7 +415,10 @@ impl GitHub for ScriptedGitHub {
         content: &str,
         message: &str,
     ) -> BoxFuture<'_, Result<(), GitHubError>> {
-        let result = self.own(repo);
+        let mut result = self.own(repo);
+        if result.is_ok() && self.state().fail_commits {
+            result = Err(GitHubError::Http("commit failed".into()));
+        }
         if result.is_ok() {
             self.state().calls.push(GitHubCall::CommitFile {
                 repo: repo.clone(),
@@ -377,6 +442,43 @@ impl GitHub for ScriptedGitHub {
         });
         let url = format!("https://github.com/{upstream}/pull/7");
         Box::pin(async move { Ok(PullRequest { number: 7, url }) })
+    }
+
+    fn delete_branch(
+        &self,
+        repo: &RepoRef,
+        branch: &str,
+    ) -> BoxFuture<'_, Result<(), GitHubError>> {
+        let result = self.own(repo);
+        if result.is_ok() {
+            self.state().calls.push(GitHubCall::DeleteBranch {
+                repo: repo.clone(),
+                branch: branch.into(),
+            });
+        }
+        Box::pin(async move { result })
+    }
+
+    fn open_pull_requests(
+        &self,
+        repo: &RepoRef,
+    ) -> BoxFuture<'_, Result<Vec<OpenPullRequest>, GitHubError>> {
+        let mut s = self.state();
+        s.calls.push(GitHubCall::OpenPullRequests(repo.clone()));
+        let pulls = s.pulls.clone();
+        Box::pin(async move { Ok(pulls) })
+    }
+
+    fn merge_pull_request(
+        &self,
+        repo: &RepoRef,
+        number: u64,
+    ) -> BoxFuture<'_, Result<(), GitHubError>> {
+        self.state().calls.push(GitHubCall::MergePullRequest {
+            repo: repo.clone(),
+            number,
+        });
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -603,6 +705,59 @@ impl GitHub for GitHubClient {
                 number: reply.number,
                 url: reply.html_url,
             })
+        })
+    }
+
+    fn delete_branch(
+        &self,
+        repo: &RepoRef,
+        branch: &str,
+    ) -> BoxFuture<'_, Result<(), GitHubError>> {
+        let (repo, branch) = (repo.clone(), branch.to_string());
+        Box::pin(async move {
+            self.own(&repo)?;
+            self.send(
+                reqwest::Method::DELETE,
+                &format!("/repos/{repo}/git/refs/heads/{branch}"),
+                None,
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn open_pull_requests(
+        &self,
+        repo: &RepoRef,
+    ) -> BoxFuture<'_, Result<Vec<OpenPullRequest>, GitHubError>> {
+        let repo = repo.clone();
+        Box::pin(async move {
+            #[derive(Deserialize)]
+            struct Head {
+                r#ref: String,
+            }
+            #[derive(Deserialize)]
+            struct Reply {
+                number: u64,
+                body: Option<String>,
+                head: Head,
+            }
+            let replies: Vec<Reply> = decode(
+                self.send(
+                    reqwest::Method::GET,
+                    &format!("/repos/{repo}/pulls?state=open&per_page=100"),
+                    None,
+                )
+                .await?,
+            )?;
+            Ok(replies
+                .into_iter()
+                .map(|r| OpenPullRequest {
+                    number: r.number,
+                    head: r.head.r#ref,
+                    body: r.body.unwrap_or_default(),
+                })
+                .collect())
         })
     }
 }

@@ -43,8 +43,8 @@ use futures::stream::{self, BoxStream, StreamExt};
 mod explorador;
 pub use explorador::{
     Charter, Contribution, Department, Explorador, ExploradorError, GitHub, GitHubCall,
-    GitHubClient, GitHubError, Issue, Opportunity, PullRequest, PullRequestDraft, RepoInfo,
-    RepoRef, ScriptedGitHub,
+    GitHubClient, GitHubError, Issue, OpenPullRequest, Opportunity, PullRequest, PullRequestDraft,
+    RepoInfo, RepoRef, ScriptedGitHub,
 };
 
 mod nakama;

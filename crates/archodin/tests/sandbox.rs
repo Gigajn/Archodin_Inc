@@ -100,6 +100,31 @@ fn container_command_isolates_the_host_and_applies_limits() {
     }
 }
 
+#[tokio::test]
+async fn staged_files_are_the_only_mount_and_cannot_escape() {
+    let sb = ContainerSandbox::docker(SandboxPolicy::default());
+    let files = vec![("src/a.rs".to_string(), "// a".to_string())];
+    sb.stage(&files).await.unwrap();
+    let args = sb.run_args("j", "ls");
+    let at = args.iter().position(|a| a == "--volume").expect("a mount");
+    let mount = &args[at + 1];
+    assert!(mount.ends_with(":/work:rw") && mount.contains("archodin-stage-"));
+    assert_eq!(args.iter().filter(|a| *a == "--volume").count(), 1);
+    let host = mount.trim_end_matches(":/work:rw");
+    assert_eq!(
+        std::fs::read_to_string(format!("{host}/src/a.rs")).unwrap(),
+        "// a"
+    );
+
+    for bad in ["../x", "/etc/passwd", "a/../../x", ""] {
+        let err = sb
+            .stage(&[(bad.to_string(), "x".to_string())])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Runtime(_)), "{bad}");
+    }
+}
+
 #[test]
 fn network_is_only_on_when_the_policy_says_so() {
     let sb = ContainerSandbox::podman(SandboxPolicy::default().with_network(true));
