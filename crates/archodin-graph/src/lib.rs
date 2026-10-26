@@ -397,3 +397,8 @@ pub use sandbox::{
 };
 mod mcp;
 pub use mcp::{McpClient, McpError, McpLibrary, McpServer, PendingMcpServer};
+mod ronin;
+pub use ronin::{
+    web_search, DuckDuckGoSearch, FoundSkill, GitHubSearch, Ronin, RoninError, Scouting,
+    SearchEngine, SearchHit, SearxngSearch,
+};
