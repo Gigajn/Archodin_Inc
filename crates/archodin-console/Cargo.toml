@@ -8,8 +8,10 @@ description = "The Agora: Archodin's web console for submitting Jobs, following 
 
 [dependencies]
 archodin-graph = { path = "../archodin-graph" }
+argon2 = "0.5"
 axum = "0.8"
 futures = "0.3.31"
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
@@ -18,3 +20,4 @@ tokio = { version = "1", features = ["rt", "sync", "time"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+mockito = "1.7"
