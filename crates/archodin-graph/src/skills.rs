@@ -112,6 +112,25 @@ impl Skill {
         })
     }
 
+    /// Builds a Skill from its parts, for storage backends that kept them apart.
+    pub fn from_parts(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        kind: SkillKind,
+        uses: Vec<String>,
+        body: impl Into<String>,
+        scripts: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            kind,
+            uses,
+            body: body.into(),
+            scripts,
+        }
+    }
+
     /// Adds a script to the Skill; it stays disabled until separately approved.
     pub fn script(mut self, name: impl Into<String>, source: impl Into<String>) -> Self {
         self.scripts.insert(name.into(), source.into());
@@ -406,6 +425,107 @@ impl SkillLibrary {
             return Err(SkillError::NotAFlow(name.into()));
         }
         Ok(FlowRun { flow, skills })
+    }
+}
+
+/// One kept version of an approved Skill, as plain data for storage backends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillVersionRecord {
+    /// The version number, counted per Role and Skill name from 1.
+    pub number: u32,
+    /// The Skill as of this version.
+    pub skill: Skill,
+    /// Whether a person approved this version's scripts.
+    pub scripts_approved: bool,
+}
+
+/// An approved Skill of one Role with all its versions, as plain data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillEntryRecord {
+    /// The Role that owns the Skill.
+    pub role: String,
+    /// The Skill's name.
+    pub name: String,
+    /// The kept versions, oldest first.
+    pub versions: Vec<SkillVersionRecord>,
+    /// Index into `versions` of the version in use.
+    pub active: usize,
+    /// Whether other Roles can use it too.
+    pub shared: bool,
+    /// The highest version number ever issued (rollbacks never reuse numbers).
+    pub last_number: u32,
+}
+
+/// Everything a [`SkillLibrary`] holds, so a storage backend can keep it and
+/// give it back after a restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillSnapshot {
+    /// Skills waiting for a person, oldest first.
+    pub pending: Vec<PendingSkill>,
+    /// Approved Skills with their versions.
+    pub owned: Vec<SkillEntryRecord>,
+}
+
+impl SkillLibrary {
+    /// Copies everything the library holds, for a storage backend to keep.
+    pub fn snapshot(&self) -> SkillSnapshot {
+        let inner = lock(&self.inner);
+        SkillSnapshot {
+            pending: inner.pending.clone(),
+            owned: inner
+                .owned
+                .iter()
+                .map(|((role, name), e)| SkillEntryRecord {
+                    role: role.clone(),
+                    name: name.clone(),
+                    versions: e
+                        .versions
+                        .iter()
+                        .map(|v| SkillVersionRecord {
+                            number: v.number,
+                            skill: v.skill.clone(),
+                            scripts_approved: v.scripts_approved,
+                        })
+                        .collect(),
+                    active: e.active,
+                    shared: e.shared,
+                    last_number: e.last_number,
+                })
+                .collect(),
+        }
+    }
+
+    /// A library holding exactly what `snapshot` holds.
+    pub fn from_snapshot(snapshot: SkillSnapshot) -> Self {
+        let owned = snapshot
+            .owned
+            .into_iter()
+            .filter(|e| !e.versions.is_empty())
+            .map(|e| {
+                let active = e.active.min(e.versions.len() - 1);
+                let entry = Entry {
+                    versions: e
+                        .versions
+                        .into_iter()
+                        .map(|v| Version {
+                            number: v.number,
+                            skill: v.skill,
+                            scripts_approved: v.scripts_approved,
+                        })
+                        .collect(),
+                    active,
+                    shared: e.shared,
+                    last_number: e.last_number,
+                };
+                ((e.role, e.name), entry)
+            })
+            .collect();
+        Self {
+            inner: Arc::new(Mutex::new(Inner {
+                pending: snapshot.pending,
+                owned,
+            })),
+        }
     }
 }
 
