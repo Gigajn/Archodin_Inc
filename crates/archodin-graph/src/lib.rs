@@ -54,8 +54,11 @@ pub use vault::{Secret, Vault, VaultError};
 
 mod agent;
 mod chain;
+mod gemini;
+mod native;
 pub use agent::{AgentError, AgentNode, AgentTool, Provider, TypedTool};
 pub use chain::{ChainEvent, FallbackReason, ModelChain, ModelPair};
+pub use gemini::Gemini;
 
 mod strategos;
 pub use strategos::{Assignment, Piece, Strategos, StrategosError, StrategosEvent};
