@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agora login</title>
+<style>
+body { font: 16px/1.4 system-ui, sans-serif; margin: 0 auto; max-width: 24rem; padding: 2rem 1rem; }
+input, button { width: 100%; box-sizing: border-box; margin: .25rem 0; font: inherit; }
+.dim { opacity: .7 }
+</style>
+</head>
+<body>
+<h1>Agora</h1>
+<form id="login">
+<input name="username" placeholder="Username" autocomplete="username" required>
+<input name="password" type="password" placeholder="Password" autocomplete="current-password" required>
+<button>Log in</button>
+<p id="error" class="dim"></p>
+</form>
+<script>
+document.getElementById("login").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  const res = await fetch("/login", {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({username: f.get("username"), password: f.get("password")}),
+  });
+  if (!res.ok) {
+    document.getElementById("error").textContent = "Wrong username or password.";
+    return;
+  }
+  // Only follow a same-site path, never another site.
+  const next = new URLSearchParams(location.search).get("next") || "/";
+  location.href = next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/\\") ? next : "/";
+});
+</script>
+</body>
+</html>

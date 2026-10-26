@@ -15,6 +15,10 @@ on:
     paths-ignore:
       - 'renovate.json'
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -38,6 +42,8 @@ jobs:
             echo "git tag version (${{ env.TAG_VERSION }}) does not match Cargo.toml version (v${{ env.CARGO_VERSION }})"
             exit 1
           fi
+      - name: Free disk space on the runner
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - name: install pandoc
         run: sudo apt-get install pandoc
       - name: Install Rust
@@ -53,6 +59,18 @@ jobs:
         with:
           command: fmt
           args: --all -- --check
+      - name: Clippy (Archodin crates, warnings as errors)
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: -p archodin -p archodin-graph -p archodin-console -p archodin-store --all-targets --no-deps -- -D warnings
+      - name: Test (Archodin crates)
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p archodin -p archodin-graph -p archodin-console -p archodin-store
+      - name: Drop debug build artifacts
+        run: rm -rf target/debug
       - name: Build release
         uses: actions-rs/cargo@v1
         with:

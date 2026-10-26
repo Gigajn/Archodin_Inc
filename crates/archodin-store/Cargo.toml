@@ -1,0 +1,29 @@
+[package]
+name = "archodin-store"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-Proprietary"
+publish = false
+description = "Archodin persistent storage: SQLite and Postgres behind the in-memory store interfaces"
+
+[features]
+default = ["sqlite"]
+# A single machine: one SQLite file.
+sqlite = ["sql", "sqlx/sqlite"]
+# A server: Postgres.
+postgres = ["sql", "sqlx/postgres", "sqlx/tls-native-tls"]
+sql = ["dep:sqlx"]
+
+[dependencies]
+archodin-graph = { path = "../archodin-graph" }
+async-trait = "0.1.89"
+futures = "0.3.31"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2.0.17"
+sqlx = { version = "0.9", default-features = false, features = ["any", "runtime-tokio"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tempfile = "3"
+testcontainers = "0.28"

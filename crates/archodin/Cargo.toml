@@ -1,0 +1,25 @@
+[package]
+name = "archodin"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-Proprietary"
+publish = false
+description = "Archodin: multi-agent library for an AI-staffed company, built on langchain-rust"
+
+[dependencies]
+langchain-rust = { path = "../.." }
+archodin-graph = { path = "../archodin-graph" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+mockito = "1.7"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+async-trait = "0.1"
+futures = "0.3.31"
+
+[features]
+ollama = ["archodin-graph/ollama"]
+bedrock = ["archodin-graph/bedrock"]
