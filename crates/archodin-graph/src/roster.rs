@@ -156,6 +156,13 @@ impl Roster {
         lock(&self.inner).roles.get(name).cloned()
     }
 
+    /// Every Role, ordered by name.
+    pub fn roles(&self) -> Vec<Role> {
+        let mut roles: Vec<Role> = lock(&self.inner).roles.values().cloned().collect();
+        roles.sort_by(|a, b| a.name.cmp(&b.name));
+        roles
+    }
+
     /// Lets the Agent called `name` go, returning it if there was one.
     pub fn release(&self, name: &str) -> Option<Agent> {
         let mut inner = lock(&self.inner);

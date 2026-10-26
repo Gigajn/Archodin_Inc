@@ -391,9 +391,12 @@ impl<S: Clone + Send + 'static> Graph<S> {
 mod handoff;
 pub use handoff::{Briefing, Handoff, Turn, HISTORY_TOOL};
 mod skills;
-pub use skills::{FlowRun, PendingSkill, Skill, SkillError, SkillKind, SkillLibrary};
+pub use skills::{
+    FlowRun, PendingSkill, Skill, SkillEntryRecord, SkillError, SkillKind, SkillLibrary,
+    SkillSnapshot, SkillVersionRecord,
+};
 mod learning;
-pub use learning::{Akasha, LearnError, Learned, Learner, MIN_TOOL_CALLS};
+pub use learning::{fact_key, Akasha, LearnError, Learned, Learner, MIN_TOOL_CALLS};
 mod vigil;
 pub use vigil::{RejectedBy, SkillSource, Verdict, Vigil};
 mod sandbox;

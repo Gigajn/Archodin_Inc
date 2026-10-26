@@ -61,12 +61,12 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: clippy
-          args: -p archodin -p archodin-graph -p archodin-console --all-targets --no-deps -- -D warnings
+          args: -p archodin -p archodin-graph -p archodin-console -p archodin-store --all-targets --no-deps -- -D warnings
       - name: Test (Archodin crates)
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: -p archodin -p archodin-graph -p archodin-console
+          args: -p archodin -p archodin-graph -p archodin-console -p archodin-store
       - name: Build release
         uses: actions-rs/cargo@v1
         with:

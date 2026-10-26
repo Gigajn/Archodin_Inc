@@ -1,4 +1,4 @@
-workspace = { members = ["examples/vector_store_surrealdb", "crates/archodin", "crates/archodin-graph", "crates/archodin-console"] }
+workspace = { members = ["examples/vector_store_surrealdb", "crates/archodin", "crates/archodin-graph", "crates/archodin-console", "crates/archodin-store"] }
 [package]
 name = "langchain-rust"
 version = "7.0.0"

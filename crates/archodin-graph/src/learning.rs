@@ -211,7 +211,9 @@ pub struct Akasha {
     facts: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
 }
 
-fn key(fact: &str) -> String {
+/// The key two facts share when the Akasha treats them as the same fact:
+/// spacing, case and closing punctuation are ignored.
+pub fn fact_key(fact: &str) -> String {
     fact.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -261,17 +263,22 @@ impl Akasha {
     /// case, spacing and closing punctuation) or the fact is empty.
     pub fn remember_for_role(&self, role: &str, fact: &str) -> bool {
         let fact = fact.split_whitespace().collect::<Vec<_>>().join(" ");
-        let k = key(&fact);
+        let k = fact_key(&fact);
         if k.is_empty() {
             return false;
         }
         let mut all = lock(&self.facts);
         let list = all.entry(role.to_string()).or_default();
-        if list.iter().any(|f| key(f) == k) {
+        if list.iter().any(|f| fact_key(f) == k) {
             return false;
         }
         list.push(fact);
         true
+    }
+
+    /// The Roles that have at least one fact.
+    pub fn roles(&self) -> Vec<String> {
+        lock(&self.facts).keys().cloned().collect()
     }
 
     /// The facts of `role`, oldest first.
