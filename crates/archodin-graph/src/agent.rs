@@ -10,6 +10,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use futures::future::{join_all, BoxFuture};
+use langchain_rust::language_models::llm::LLM;
 use langchain_rust::language_models::options::CallOptions;
 use langchain_rust::llm::openai::{OpenAI, OpenAIConfig};
 use langchain_rust::schemas::{FunctionDefinition, Message};
@@ -32,6 +33,8 @@ pub struct Provider {
     model: String,
     account: Option<String>,
     pricing: Option<crate::Pricing>,
+    /// Set for Providers with their own API (see `native.rs`).
+    native: Option<crate::native::Native>,
 }
 
 impl Provider {
@@ -47,6 +50,24 @@ impl Provider {
             model: model.into(),
             account: None,
             pricing: None,
+            native: None,
+        }
+    }
+
+    /// A Provider reached through its own API: `build` makes the LLM from the API key.
+    pub(crate) fn with_native(
+        base_url: String,
+        api_key: KeySource,
+        model: String,
+        native: crate::native::Native,
+    ) -> Self {
+        Self {
+            base_url,
+            api_key,
+            model,
+            account: None,
+            pricing: None,
+            native: Some(native),
         }
     }
 
@@ -97,7 +118,7 @@ impl Provider {
         }
     }
 
-    pub(crate) fn llm(&self, tools: &[AgentTool]) -> Result<OpenAI<OpenAIConfig>, String> {
+    pub(crate) fn llm(&self, tools: &[AgentTool]) -> Result<Box<dyn LLM>, String> {
         let key = match &self.api_key {
             KeySource::Fixed(key) => key.clone(),
             KeySource::Vault(vault, name) => vault
@@ -106,26 +127,37 @@ impl Provider {
                 .expose()
                 .to_string(),
         };
+        if let Some(native) = &self.native {
+            let mut llm = native.build(key);
+            if !tools.is_empty() {
+                llm.add_options(CallOptions::new().with_functions(definitions(tools)));
+            }
+            return Ok(llm);
+        }
         let config = OpenAIConfig::new()
             .with_api_base(&self.base_url)
             .with_api_key(key);
         let mut options = CallOptions::default();
         if !tools.is_empty() {
-            options = options.with_functions(
-                tools
-                    .iter()
-                    .map(|t| FunctionDefinition::new(&t.name, &t.description, t.parameters.clone()))
-                    .collect(),
-            );
+            options = options.with_functions(definitions(tools));
         }
-        Ok(OpenAI::new(config)
-            .with_model(self.model.clone())
-            .with_options(options))
+        Ok(Box::new(
+            OpenAI::new(config)
+                .with_model(self.model.clone())
+                .with_options(options),
+        ))
     }
 }
 
+fn definitions(tools: &[AgentTool]) -> Vec<FunctionDefinition> {
+    tools
+        .iter()
+        .map(|t| FunctionDefinition::new(&t.name, &t.description, t.parameters.clone()))
+        .collect()
+}
+
 #[derive(Clone)]
-enum KeySource {
+pub(crate) enum KeySource {
     Fixed(String),
     Vault(crate::Vault, String),
 }

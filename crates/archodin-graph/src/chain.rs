@@ -5,7 +5,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use langchain_rust::language_models::llm::LLM;
 use langchain_rust::language_models::GenerateResult;
 use langchain_rust::schemas::Message;
 
