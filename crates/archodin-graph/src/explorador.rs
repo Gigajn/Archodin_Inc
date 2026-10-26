@@ -972,3 +972,10 @@ impl Department {
         Ok(github.open_pull_request(upstream, draft).await?)
     }
 }
+
+impl Department {
+    /// Records an Agent hired for the Department after it opened (used by upgrades).
+    pub(crate) fn add_agent(&self, name: String) {
+        lock(&self.inner.agents).push(name);
+    }
+}

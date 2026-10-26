@@ -418,3 +418,8 @@ pub use ronin::{
     web_search, DuckDuckGoSearch, FoundSkill, GitHubSearch, Ronin, RoninError, Scouting,
     SearchEngine, SearchHit, SearxngSearch,
 };
+
+mod upgrade;
+pub use upgrade::{
+    DepartmentSetup, RunningJob, Upgrade, UpgradeCharter, UpgradeError, VersionedDepartment,
+};
