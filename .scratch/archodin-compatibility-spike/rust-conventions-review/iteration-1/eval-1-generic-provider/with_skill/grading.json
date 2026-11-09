@@ -1,0 +1,48 @@
+{
+  "expectations": [
+    {
+      "text": "Proposes a vendor-independent public Provider request/response contract and actionable typed error variants.",
+      "passed": true,
+      "evidence": "outputs/answer.md: `pub trait Provider: Send + Sync` declares associated `Request`, `Response`, and `Error` types and returns `Result<Self::Response, Self::Error>`. The design says, 'Requests and responses own their boundary data' and proposes 'invalid configuration, unsupported operation, timeout, rate limiting with optional retry delay, and backend failure with a retained typed source.' This is a concrete integration-neutral boundary with actionable failure categories; associated payload types intentionally leave the operation domain open."
+    },
+    {
+      "text": "Does not impose legacy routing codes or employee persistence on the generic library.",
+      "passed": true,
+      "evidence": "outputs/answer.md explicitly says '`NO_KEYS`, `ALL_COOLDOWN`, `ALL_FAILED`, and `UNKNOWN_CLUSTER` describe its application, not a generic provider; introduce them only if that domain is explicitly required.' The proposed core contract contains no employee model or persistence requirement."
+    },
+    {
+      "text": "Keeps integration dependencies undecided; named crates are conditional options rather than required additions.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'No integration SDK, transport, credentials scheme, or provider-specific payload is selected.' It uses standard-library trait types; '`thiserror` can be an adapter choice' and 'a Tokio adapter can use Tokio timeouts without imposing Tokio on the core.' These are conditional adapter options, not dependency additions."
+    },
+    {
+      "text": "Proposes deterministic offline tests through the public Provider boundary without credentials or inference spend.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'Consumers depend on `P: Provider`, allowing a fake wherever a real adapter would be used' and 'Use deterministic offline fakes and injected transports.' Planned cases include 'successful response, typed failure propagation, timeout, rate-limit metadata, cancellation cleanup, and no implicit retry'; 'Keep optional live-service tests explicitly ignored by default.' In combination these describe public-boundary, offline tests rather than paid/credentialed service calls."
+    }
+  ],
+  "summary": {"passed": 4, "failed": 0, "total": 4, "pass_rate": 1.0},
+  "timing": {"total_tokens": null, "duration_ms": null, "total_duration_seconds": null, "note": "Zed spawn_agent returned no token or timing metrics; unknown, not zero."},
+  "claims": [
+    {
+      "claim": "The proposed contract uses static dispatch and is not dyn-compatible.",
+      "type": "factual",
+      "verified": true,
+      "evidence": "outputs/answer.md says 'This contract is not dyn-compatible'; the displayed trait returns `impl std::future::Future` and consumers use `P: Provider`. This is a design-level assessment, not a compile check."
+    },
+    {
+      "claim": "The answer reports design recommendations, not executed validation.",
+      "type": "process",
+      "verified": true,
+      "evidence": "outputs/answer.md: 'This is a design proposal; no build, tests, dependency resolution, or network validation was performed.' transcript.md corroborates: 'Proposed contract and tests are design recommendations, not compiled or executed evidence.' Verification here is consistency of the supplied artifacts, not an independent execution audit."
+    }
+  ],
+  "eval_feedback": {
+    "suggestions": [
+      {"assertion": "Does not impose legacy routing codes or employee persistence on the generic library.", "reason": "Useful scope guard, but both runs satisfy it; omission alone can pass and does not establish a positive, reusable library/application seam. Consider requiring an explanation of where application policy is injected."},
+      {"assertion": "Proposes a vendor-independent public Provider request/response contract and actionable typed error variants.", "reason": "Both materially different contracts pass: this run uses associated payload/error types, while the baseline specifies a completion schema and shared error enum. If interchangeability is the intended outcome, require two adapters sharing a caller-owned request/response contract and explain how errors remain actionable to generic consumers."},
+      {"reason": "The offline-test assertion accepts a behavioral test list without a controlled timeout/cancellation mechanism or evidence that fake and real adapters satisfy the same semantics. Require a concrete public-boundary test scenario and distinguish fake behavior from adapter protocol mapping."}
+    ],
+    "overall": "4/4 for guidance, not implementation. All Provider assertions pass both configurations and do not demonstrate an improvement. Integration compatibility, compilation, runtime cleanup and actual test execution remain unverified."
+  }
+}

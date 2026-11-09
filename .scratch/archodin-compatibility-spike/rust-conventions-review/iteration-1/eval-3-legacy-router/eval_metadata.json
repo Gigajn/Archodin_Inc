@@ -1,0 +1,11 @@
+{
+  "eval_id": 3,
+  "eval_name": "legacy-router",
+  "prompt": "Maintain the legacy application's Python-parity router. Propose a focused maintenance plan for its error handling and offline tests, preserving compatibility.",
+  "assertions": [
+    "Explicitly preserves NO_KEYS, ALL_COOLDOWN, ALL_FAILED and UNKNOWN_CLUSTER in the legacy router.",
+    "Uses the existing Python oracle/contract to determine exact conditions and ordering instead of inventing parity semantics.",
+    "Proposes public-surface offline parity tests using injected transport and typed errors.",
+    "Keeps legacy compatibility policy in application scope rather than requiring it in generic Archodin APIs."
+  ]
+}
