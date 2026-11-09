@@ -1,0 +1,53 @@
+{
+  "expectations": [
+    {
+      "text": "Validates structured Tool input before effects and returns typed output/failure through a public Tool boundary.",
+      "passed": true,
+      "evidence": "outputs/answer.md defines a Tool with associated `Input`/`Output` and `Result<Output, ToolError>`. Its AddTool example says 'validation constructs `AddInput` with documented bounds' and 'Invalid input must fail before invoking the execution adapter or consuming a scripted step.' `AddOutput { sum }`, checked addition, and structured `InvalidInput { field, reason }`/`Overflow` failures make the validation ordering and typed result concrete."
+    },
+    {
+      "text": "Uses an injected scripted fake and offline behavioral tests, including a deterministic hanging operation.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'Inject a `ScriptedTool` implementing the same contract' with `Return`, `Fail`, and `Hang` FIFO steps. '`Hang` acknowledges entry through a synchronization signal, then awaits a never-ready future.' Tests 'await the entry signal, advance a controlled clock where needed, and assert the exact error variant plus the cleanup signal. Avoid wall-clock sleeps.' This is a deterministic no-I/O behavioral seam, not an actual hanging service call."
+    },
+    {
+      "text": "Uses the caller Tokio runtime with explicit deadline and cancellation outcomes.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'Reuse the caller’s Tokio runtime.' The context carries 'an absolute deadline and a caller-controlled cancellation signal'; the runner 'races execution against cancellation and the remaining absolute deadline' and defines `DeadlineExceeded` and `Cancelled` errors. It also calls for an explicit simultaneous-readiness precedence policy."
+    },
+    {
+      "text": "Explains how owned work is stopped/joined and does not equate dropping a future with stopping remote or arbitrary blocking work.",
+      "passed": true,
+      "evidence": "outputs/answer.md limits its local drop-cleanup claim: 'This fake spawns no tasks and performs no I/O, so dropping that future fully cleans up its owned work.' It separately says 'Dropping execution does not stop remote computation' and requires adapters to 'propagate cancellation and stop/join tasks or terminate/reap processes before reporting completion.' It excludes blocking work from the fake, rather than claiming future drop stops arbitrary blocking work."
+    },
+    {
+      "text": "Does not impose company employee models or legacy routing codes on the generic Tool.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'Keep this an Archodin library mechanism: no Basileia workflows, company agents, or persistence policy.' The arithmetic Tool, runner, fake, and errors introduce neither employee models nor legacy router codes."
+    }
+  ],
+  "summary": {"passed": 5, "failed": 0, "total": 5, "pass_rate": 1.0},
+  "timing": {"total_tokens": null, "duration_ms": null, "total_duration_seconds": null, "note": "Zed spawn_agent returned no token or timing metrics; unknown, not zero."},
+  "claims": [
+    {
+      "claim": "Dropping the proposed no-task, no-I/O hanging fake releases its owned work.",
+      "type": "quality",
+      "verified": true,
+      "evidence": "outputs/answer.md describes a never-ready future, a drop guard, and 'This fake spawns no tasks and performs no I/O'. Under this stated design, the local lifecycle claim is coherent and is explicitly not generalized to remote work. No cleanup test has actually run."
+    },
+    {
+      "claim": "The plan has not been validated against workspace facilities or executed tests.",
+      "type": "process",
+      "verified": true,
+      "evidence": "outputs/answer.md: 'Workspace APIs, dependencies, and clock/cancellation facilities were not inspected; no tests or repository gate were run'. transcript.md confirms 'The answer is a proposed design, not an implementation or evidence of SDK/protocol compatibility.' These records are consistent; they are not a runtime audit."
+    }
+  ],
+  "eval_feedback": {
+    "suggestions": [
+      {"assertion": "Explains how owned work is stopped/joined and does not equate dropping a future with stopping remote or arbitrary blocking work.", "reason": "Both runs provide coherent lifecycle guidance but use a no-task pending fake. This does not test shutdown of a non-cooperative child or already-running blocking operation. Add a guidance scenario requiring a bounded cleanup/escalation policy and explicit treatment of spawn_blocking or external processes."},
+      {"assertion": "Uses an injected scripted fake and offline behavioral tests, including a deterministic hanging operation.", "reason": "The current wording permits the baseline's fallback to bounded real-time tests even though those do not provide deterministic deadline scheduling. If deterministic time is essential, explicitly require a controlled clock and entry/cleanup synchronization with no wall-clock fallback."},
+      {"reason": "The input-validation assertion meaningfully distinguishes these runs. Preserve its requirement to show that invalid input consumes no script step and invokes no adapter, rather than accepting a typed InvalidInput variant alone."}
+    ],
+    "overall": "5/5 for guidance. The before-effects validation and controlled-clock proposal are substantive strengths. No implementation, compile check, deadline behavior or cleanup execution is verified by this score."
+  }
+}

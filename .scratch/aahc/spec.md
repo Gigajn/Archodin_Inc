@@ -1,5 +1,17 @@
 # SRS & Cetak Biru Infrastruktur — Autonomous AI Holding Company (AAHC)
 
+## Catatan Rekonsiliasi Milestone 0
+
+AAHC telah berganti nama menjadi **Basileia**. Dokumen ini dipertahankan sebagai baseline kebutuhan dan riwayat implementasi lama; path dan isi historis belum dimigrasikan seluruhnya. Batas Archodin–Basileia mengikuti `docs/adr/0001-archodin-basileia-boundary.md`; rencana pemisahan repository mengikuti ADR 0002. Kepemilikan informasi diatur dalam `docs/agents/domain.md`.
+
+Keputusan yang telah dikonfirmasi dalam `Goals.md`, bagian **Confirmed Product Scope**, menggantikan asumsi berikut pada isi lama di bawah:
+
+- Empat divisi bukan struktur wajib; masing-masing merupakan contoh atau kandidat pengembangan.
+- Agora operasional awal berupa dashboard. Kantor visual 2D menjadi target lanjutan, bukan syarat operasi pertama.
+- Free tier dan model lokal merupakan pilihan optimasi, bukan jaminan biaya mendekati nol atau failover tanpa gangguan. Perpindahan ke layanan berbayar tetap memerlukan otorisasi sesuai kebijakan Budget.
+
+Rancangan FastAPI/LangGraph, pilihan dependency, dan klaim status implementasi di bawah perlu direkonsiliasi dengan target Rust dan bukti kode/pengujian saat ini. Ini tidak berarti seluruh kebutuhan lama dibuang atau seluruh fiturnya sudah terverifikasi. Ticket lama belum otomatis dinilai ulang melalui perubahan catatan ini.
+
 **Versi Dokumen:** 2.0 (Enterprise Local-First Edition)
 **Arsitektur Target:** Localhost Workstation / Mini-Server 24/7 dengan Antarmuka Visual 2D Pixel-Art
 **Status:** Fase 1 (fondasi) diimplementasikan — lihat catatan status di akhir dokumen.
@@ -363,13 +375,16 @@ hanya bahasanya yang berubah. Pohon Python Fase 1 **dibekukan sebagai oracle par
 | 7 | Prasyarat: `git init`, `rustup` (toolchain ter-pin), `clang` (untuk crate yang butuh bindgen). |
 | 8 | Urutan porting: skema → router → HRD → skill hunter → hub → trading → ML. |
 
-### Batas batal (dieksekusi di tiket 17)
+### Batas batal (dihapus)
 
-> Bila **router + HRD** belum mencapai paritas dalam **5 hari kerja** sejak tiket 04 dimulai,
-> atau total rewrite melewati anggaran waktu yang dicatat, maka rewrite **dibatalkan**:
-> Python tetap menjadi produksi, pohon Rust disimpan sebagai eksperimen.
-> Keputusan akhir diambil dengan angka, bukan selera — termasuk pengukuran RSS/CPU di tiket 16
-> yang harus dibandingkan dengan baseline Python **45,7 MB / ~0,07% core saat menganggur**.
+> Bila router + HRD belum mencapai paritas dalam 5 hari kerja sejak tiket 04 dimulai, atau
+> total rewrite melewati anggaran waktu yang dicatat, maka rewrite dibatalkan; Python tetap
+> menjadi produksi, pohon Rust disimpan sebagai eksperimen.
+>
+> **Dihapus sesuai aturan AGENTS.md (Working rules §1):** batas waktu kerja yang tidak
+> berhubungan dengan perilaku produk diabaikan. Paritas dan keputusan lanjut/kembali tetap
+> dituntaskan di tiket 17 dengan angka (termasuk pengukuran RSS/CPU tiket 16 yang dibandingkan
+> dengan baseline Python **45,7 MB / ~0,07% core saat menganggur**), tetapi *tanpa* tenggat waktu.
 
 ### Rencana tiket
 

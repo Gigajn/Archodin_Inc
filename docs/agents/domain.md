@@ -38,6 +38,17 @@ Multi-context repo (presence of `GLOSSARY-MAP.md` at the root):
         └── docs/adr/
 ```
 
+## Sources of truth
+
+- `Goals.md`: product vision, objectives and scope; not proof of implementation.
+- `GLOSSARY.md`: canonical meanings of domain terms, without implementation details.
+- `docs/adr/`: accepted architectural decisions and their rationale. Proposals must be marked explicitly.
+- `.scratch/<feature>/spec.md`: feature behavior and acceptance criteria.
+- Individual tickets: bounded work, status and validation evidence.
+- Code and tests: implemented behavior; claim validation only when it has actually run.
+
+Reference the owning document instead of copying its details. A target not supported by code is unimplemented, not silently discarded. Surface and resolve a spec/ADR conflict before implementation. During Milestone 0, the existing AAHC spec is being reconciled with Basileia and must not be treated as uniformly superseded or uniformly authoritative.
+
 ## Use the glossary's vocabulary
 
 When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `GLOSSARY.md`. Don't drift to synonyms the glossary explicitly avoids.

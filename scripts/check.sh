@@ -6,6 +6,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 echo "==> fmt"
 cargo fmt --all --check
+echo "==> frontier"
+python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 echo "==> clippy"
 cargo clippy --all-targets --all-features -- -D warnings
 echo "==> test"

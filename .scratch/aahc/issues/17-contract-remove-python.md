@@ -8,7 +8,7 @@ Catatan: 10 (spike) sudah terserap ke 11; 12 tetap digerbangi manusia sehingga t
 
 **Status:** ready-for-agent
 
-Batas batal yang telah disepakati dan harus dihormati di tiket ini: bila router dan HRD (modul inti pertama) tidak mencapai paritas dalam **5 hari kerja sejak tiket 04 dimulai**, atau bila total rewrite melewati anggaran waktu yang dicatat di spec, maka rewrite **dibatalkan**: Python tetap menjadi produksi dan pohon Rust disimpan sebagai eksperimen, bukan diadopsi.
+*(Batas batal berbasis waktu kerja dihapus sesuai aturan AGENTS.md: paritas tidak digerbangi tenggat waktu; pengerjaan berjalan secepat mungkin. Paritas tetap dibuktikan dengan angka, bukan selera).*
 
 - [ ] Setiap kasus uji Python Fase 1 punya padanan Rust yang lulus, dan pemetaan kasus-per-kasus tercatat (bukan sekadar "jumlahnya sama").
 - [ ] Oracle paritas skema melaporkan nol perbedaan **pada skema Python Fase 1**; tabel aditif baru (metrik ML, pesan CS, draf marketing) berada di luar perbandingan dan didokumentasikan sebagai perluasan — bukan divergensi diam-diam. Himpunan kode error identik.

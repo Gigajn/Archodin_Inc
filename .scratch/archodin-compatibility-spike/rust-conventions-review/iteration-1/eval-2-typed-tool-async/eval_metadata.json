@@ -1,0 +1,12 @@
+{
+  "eval_id": 2,
+  "eval_name": "typed-tool-async",
+  "prompt": "Plan a typed Tool with a scripted fake and a hanging asynchronous call.",
+  "assertions": [
+    "Validates structured Tool input before effects and returns typed output/failure through a public Tool boundary.",
+    "Uses an injected scripted fake and offline behavioral tests, including a deterministic hanging operation.",
+    "Uses the caller Tokio runtime with explicit deadline and cancellation outcomes.",
+    "Explains how owned work is stopped/joined and does not equate dropping a future with stopping remote or arbitrary blocking work.",
+    "Does not impose company employee models or legacy routing codes on the generic Tool."
+  ]
+}
