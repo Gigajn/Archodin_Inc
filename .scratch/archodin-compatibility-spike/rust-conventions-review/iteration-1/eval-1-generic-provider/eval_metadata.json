@@ -1,0 +1,11 @@
+{
+  "eval_id": 1,
+  "eval_name": "generic-provider",
+  "prompt": "Design a generic Provider contract for an MIT Rust library with no selected integration dependency. Identify errors and testing.",
+  "assertions": [
+    "Proposes a vendor-independent public Provider request/response contract and actionable typed error variants.",
+    "Does not impose legacy routing codes or employee persistence on the generic library.",
+    "Keeps integration dependencies undecided; named crates are conditional options rather than required additions.",
+    "Proposes deterministic offline tests through the public Provider boundary without credentials or inference spend."
+  ]
+}

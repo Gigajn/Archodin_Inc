@@ -1,0 +1,54 @@
+{
+  "expectations": [
+    {
+      "text": "Validates structured Tool input before effects and returns typed output/failure through a public Tool boundary.",
+      "passed": false,
+      "evidence": "outputs/answer.md provides associated `Input`/`Output`, `Result<Output, ToolError>`, and an `InvalidInput` variant, but never defines validation or places it before adapter invocation/effects. Its fake will 'record the call and remove its step in a short scope'; checking expected input and returning `UnexpectedCall` is script verification, not production input validation. No planned test checks invalid input causes no execution. Typed results satisfy only part of this combined assertion."
+    },
+    {
+      "text": "Uses an injected scripted fake and offline behavioral tests, including a deterministic hanging operation.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'Inject `ScriptedTool` with a FIFO `VecDeque<Step>`' carrying expected typed input and `Return`, `Fail`, or `Hang`. '`Hang` awaits `std::future::pending()` without blocking a thread or spawning a task.' The plan calls for offline success/failure/exhaustion/hang/cancellation tests, paused time where available, and 'Synchronize on fake entry before advancing time or cancelling.' The hanging operation itself is deterministic; the optional real-time fallback weakens deadline-test determinism and is noted separately."
+    },
+    {
+      "text": "Uses the caller Tokio runtime with explicit deadline and cancellation outcomes.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'The runner owns the time budget and a per-work-unit `CancellationToken`. Race cancellation against `tokio::time::timeout(limit, tool.call(input))`, mapping outcomes to typed variants.' Those variants include `TimedOut { limit: Duration }` and `Cancelled`. 'Keep the call future inline' describes execution in the ambient caller Tokio context, not construction of a nested runtime. This is a relative per-call deadline, not the candidate's absolute-deadline context."
+    },
+    {
+      "text": "Explains how owned work is stopped/joined and does not equate dropping a future with stopping remote or arbitrary blocking work.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'Dropping a future does not undo remote effects or stop already-running blocking work; mutating tools need an explicit idempotency/reconciliation policy.' It keeps execution inline and requires cancellation-safe implementations; 'Any necessary child tasks inherit the token and are joined during shutdown.' Thus cancellation propagation and joining are stated without promising arbitrary work stops on drop."
+    },
+    {
+      "text": "Does not impose company employee models or legacy routing codes on the generic Tool.",
+      "passed": true,
+      "evidence": "outputs/answer.md limits its domain advice: 'Preserve existing domain error codes when applicable; their relevance to this Tool is unspecified.' It introduces no employee model, persistence policy, or mandatory legacy code. The conditional compatibility note is not an imposition on this generic Tool."
+    }
+  ],
+  "summary": {"passed": 4, "failed": 1, "total": 5, "pass_rate": 0.8},
+  "timing": {"total_tokens": null, "duration_ms": null, "total_duration_seconds": null, "note": "Zed spawn_agent returned no token or timing metrics; unknown, not zero."},
+  "claims": [
+    {
+      "claim": "The proposed hanging fake does not block a thread or spawn background work.",
+      "type": "quality",
+      "verified": true,
+      "evidence": "outputs/answer.md implements the design with '`Hang` awaits `std::future::pending()` without blocking a thread or spawning a task' and releases the mutex guard before awaiting. This supports the design-level claim only; there is no implementation or runtime evidence."
+    },
+    {
+      "claim": "No dependencies were added and no tests were executed in this evaluation.",
+      "type": "process",
+      "verified": true,
+      "evidence": "outputs/answer.md: 'This is a design only: no dependencies added, implementation inspected, or tests executed.' transcript.md also records 'No shell commands, network access, dependency changes, external calls, or test/gate execution.' The supplied records agree; no independent execution audit was performed."
+    }
+  ],
+  "eval_feedback": {
+    "suggestions": [
+      {"assertion": "Validates structured Tool input before effects and returns typed output/failure through a public Tool boundary.", "reason": "This assertion is discriminating: typed inputs and an InvalidInput enum variant alone do not establish validation before effects. The baseline omits that lifecycle step. Retain a no-adapter-call/no-script-consumption acceptance scenario."},
+      {"assertion": "Uses an injected scripted fake and offline behavioral tests, including a deterministic hanging operation.", "reason": "The hanging pending future is deterministic, so this passes literally. However, 'otherwise use bounded real-time tests' weakens the larger determinism goal. Require controlled time with explicit entry and cleanup signals, or state whether bounded wall-clock scheduling is acceptable."},
+      {"assertion": "Uses the caller Tokio runtime with explicit deadline and cancellation outcomes.", "reason": "Ambient Tokio timeout execution satisfies this design behavior without the words 'caller runtime'. If propagation of one end-to-end deadline is intended, explicitly require an absolute deadline and prohibit resetting the budget at nested calls; the existing assertion also accepts a relative limit."},
+      {"reason": "The generic-domain exclusion and owned-work assertions pass both configurations. Their scores do not prove blocking-work shutdown or distinguish materially different policy-injection designs."}
+    ],
+    "overall": "4/5: missing pre-effect validation is substantive, not a keyword omission. Other passes assess proposed behavior only. Deterministic deadline scheduling and bounded shutdown remain incompletely specified, not executed guarantees."
+  }
+}

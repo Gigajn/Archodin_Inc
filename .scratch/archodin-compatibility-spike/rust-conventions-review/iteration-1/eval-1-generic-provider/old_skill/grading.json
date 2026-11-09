@@ -1,0 +1,48 @@
+{
+  "expectations": [
+    {
+      "text": "Proposes a vendor-independent public Provider request/response contract and actionable typed error variants.",
+      "passed": true,
+      "evidence": "outputs/answer.md proposes `complete(&self, request: CompletionRequest, context: OperationContext)` returning `Result<CompletionResponse, ProviderError>`, specifies message/content/tool/usage fields, and says 'Use library-owned structured values, not SDK types.' Errors include `InvalidRequest`, `UnsupportedCapability`, `RateLimited { retry_after }`, `DeadlineExceeded`, `Cancelled`, `Transport`, and `InvalidResponse`, with safe structured identifiers. This supplies concrete vendor-independent data and failure semantics."
+    },
+    {
+      "text": "Does not impose legacy routing codes or employee persistence on the generic library.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'Archodin owns generic mechanisms; Basileia supplies company agents, prompts, workflows, secrets and retry policy.' The proposed completion contract and ProviderError contain no legacy router codes or employee persistence requirement."
+    },
+    {
+      "text": "Keeps integration dependencies undecided; named crates are conditional options rather than required additions.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'No integration dependency is selected; langchain-rust is only a candidate.' It describes boxed standard-library futures 'without requiring async-trait' and leaves context implementation/runtime integration undecided. It requires compatibility review before selecting dependencies rather than assuming it is complete."
+    },
+    {
+      "text": "Proposes deterministic offline tests through the public Provider boundary without credentials or inference spend.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'Develop one public behavior red→green at a time using scripted adapters: response preservation, unsupported requests, error variants, missing usage, and secret redaction.' It adds 'controlled clocks and synchronization for deadlines, cancellation, bounded concurrency and owned-work cleanup' and explicitly says 'Default tests need no network, credentials or inference spend.'"
+    }
+  ],
+  "summary": {"passed": 4, "failed": 0, "total": 4, "pass_rate": 1.0},
+  "timing": {"total_tokens": null, "duration_ms": null, "total_duration_seconds": null, "note": "Zed spawn_agent returned no token or timing metrics; unknown, not zero."},
+  "claims": [
+    {
+      "claim": "Generic fakes alone cannot establish real adapter protocol mapping.",
+      "type": "quality",
+      "verified": true,
+      "evidence": "outputs/answer.md: 'Adapter protocol fixtures must separately establish real mapping; generic fakes cannot.' The proposed fake exercises the library contract rather than an inspected SDK/protocol, so this is an appropriate limitation, not a parity claim."
+    },
+    {
+      "claim": "No tests or repository gate were run for the proposal.",
+      "type": "process",
+      "verified": true,
+      "evidence": "outputs/answer.md: 'This is a design only; no tests or repository gate were run.' transcript.md likewise records 'No tests, builds, network requests, dependency operations, commits, or ticket completion actions.' This verifies consistency of the records, not an independent execution audit."
+    }
+  ],
+  "eval_feedback": {
+    "suggestions": [
+      {"assertion": "Does not impose legacy routing codes or employee persistence on the generic library.", "reason": "Both configurations pass this negative scope guard. Require a positive policy-injection seam if the goal is to distinguish reusable library design from merely omitting application nouns."},
+      {"assertion": "Proposes a vendor-independent public Provider request/response contract and actionable typed error variants.", "reason": "The prompt leaves Provider operations unspecified, but this run selects a completion-oriented schema. The assertion does not distinguish a suitably scoped completion API from a needlessly narrow generic Provider. Specify the intended operation domain or require the answer to state the scope assumption explicitly."},
+      {"reason": "Both Provider runs score 4/4 despite different dispatch and payload choices. Require an adapter-substitution scenario, unknown-capability handling and concrete failure assertions if those are intended differentiators."}
+    ],
+    "overall": "4/4 for substantive planning. These assertions are non-discriminating across the two Provider answers; equal scores do not establish equivalent implementations or skill effectiveness. Runtime/library compatibility and execution remain unverified."
+  }
+}

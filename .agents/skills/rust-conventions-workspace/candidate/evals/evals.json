@@ -1,0 +1,42 @@
+{
+  "skill_name": "rust-conventions",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Design a generic Provider contract for an MIT Rust library with no selected integration dependency. Identify errors and testing.",
+      "expected_output": "A generic, vendor-independent contract with typed errors and offline testing; no employee model, mandatory legacy routing codes or unjustified dependency commitment.",
+      "files": [],
+      "assertions": [
+        "Proposes a vendor-independent public Provider request/response contract and actionable typed error variants.",
+        "Does not impose legacy routing codes or employee persistence on the generic library.",
+        "Keeps integration dependencies undecided; named crates are conditional options rather than required additions.",
+        "Proposes deterministic offline tests through the public Provider boundary without credentials or inference spend."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Plan a typed Tool with a scripted fake and a hanging asynchronous call.",
+      "expected_output": "Structured validation, typed outcomes, Tokio deadlines and cancellation, owned-work cleanup and offline tests through public interfaces.",
+      "files": [],
+      "assertions": [
+        "Validates structured Tool input before effects and returns typed output/failure through a public Tool boundary.",
+        "Uses an injected scripted fake and offline behavioral tests, including a deterministic hanging operation.",
+        "Uses the caller Tokio runtime with explicit deadline and cancellation outcomes.",
+        "Explains how owned work is stopped/joined and does not equate dropping a future with stopping remote or arbitrary blocking work.",
+        "Does not impose company employee models or legacy routing codes on the generic Tool."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Maintain the legacy application's Python-parity router. Propose a focused maintenance plan for its error handling and offline tests, preserving compatibility.",
+      "expected_output": "Preserve established legacy semantics and parity in application scope without imposing them on generic Archodin APIs.",
+      "files": [],
+      "assertions": [
+        "Explicitly preserves NO_KEYS, ALL_COOLDOWN, ALL_FAILED and UNKNOWN_CLUSTER in the legacy router.",
+        "Uses the existing Python oracle/contract to determine exact conditions and ordering instead of inventing parity semantics.",
+        "Proposes public-surface offline parity tests using injected transport and typed errors.",
+        "Keeps legacy compatibility policy in application scope rather than requiring it in generic Archodin APIs."
+      ]
+    }
+  ]
+}

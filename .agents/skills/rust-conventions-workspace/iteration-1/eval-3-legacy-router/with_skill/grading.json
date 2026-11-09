@@ -1,0 +1,54 @@
+{
+  "expectations": [
+    {
+      "text": "Explicitly preserves NO_KEYS, ALL_COOLDOWN, ALL_FAILED and UNKNOWN_CLUSTER in the legacy router.",
+      "passed": true,
+      "evidence": "outputs/answer.md requires a parity matrix for '`NO_KEYS`, `ALL_COOLDOWN`, `ALL_FAILED` and `UNKNOWN_CLUSTER`' and says 'Preserve verified codes, status, serialization and any contractually observable message text.' This explicitly preserves all four compatibility outcomes while leaving their uninspected semantics unresolved."
+    },
+    {
+      "text": "Uses the existing Python oracle/contract to determine exact conditions and ordering instead of inventing parity semantics.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'Before editing, obtain the approved maintenance ticket, existing public router contract and Python oracle.' The matrix must record 'exact triggering conditions, precedence when conditions overlap, routing/fallback order, and public response shape'. It warns 'Their names alone do not establish their meanings' and says the details 'remain unresolved'. This passes as an oracle-first plan, not as an executed comparison."
+    },
+    {
+      "text": "Proposes public-surface offline parity tests using injected transport and typed errors.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'Exercise the public router through an injected scripted transport' and 'Assert typed variants at the Rust contract and exact compatibility responses at the application boundary'. It covers overlap precedence, routing/fallback and error mapping, proposes sanitized adapter protocol fixtures, and states 'Default tests require no keys, network or inference spend'."
+    },
+    {
+      "text": "Keeps legacy compatibility policy in application scope rather than requiring it in generic Archodin APIs.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'Maintain the existing AAHC Python-parity router as application code; do not migrate it or introduce application policy into Archodin\u0027s generic Provider APIs.' It requires an 'application-owned typed router error enum' and says to keep 'legacy codes out of generic Provider errors'. This explicitly separates compatibility policy from library mechanisms."
+    }
+  ],
+  "summary": {"passed": 4, "failed": 0, "total": 4, "pass_rate": 1.0},
+  "timing": {"total_tokens": null, "duration_ms": null, "total_duration_seconds": null, "note": "Zed spawn_agent returned no token or timing metrics; unknown, not zero."},
+  "claims": [
+    {
+      "claim": "Exact legacy conditions and response mappings were not established in this proposal.",
+      "type": "process",
+      "verified": true,
+      "evidence": "outputs/answer.md: 'These artifacts were not inspected here, so those details remain unresolved.' transcript.md states 'Did not inspect ... the Python oracle' and lists exact conditions, precedence and response details as unverified. No specific parity semantics are claimed."
+    },
+    {
+      "claim": "ADRs 0001–0002 preserve the stated boundary and leave legacy migration undecided.",
+      "type": "factual",
+      "verified": false,
+      "evidence": "outputs/answer.md claims 'ADRs 0001–0002 preserve that boundary and leave legacy migration undecided'; transcript.md lists those ADRs as read. Their contents were not supplied in these run artifacts or independently checked by this grader. This claim remains unverified, not established false, and is not used as proof of actual repository policy."
+    },
+    {
+      "claim": "The answer reports no executed oracle comparisons, tests or gates.",
+      "type": "process",
+      "verified": true,
+      "evidence": "outputs/answer.md: 'No tests, oracle comparisons or gates were executed for this proposal.' transcript.md corroborates 'No terminal commands, network requests, dependency changes, tests or gates were run.' This is consistency verification of the supplied records only."
+    }
+  ],
+  "eval_feedback": {
+    "suggestions": [
+      {"assertion": "Uses the existing Python oracle/contract to determine exact conditions and ordering instead of inventing parity semantics.", "reason": "For this planning eval, an explicit oracle-first prerequisite is sufficient. It cannot verify actual use of an oracle or correct mappings because neither run inspected one. Consider rewording to 'requires oracle-backed characterization before changes', or supply an oracle excerpt and require one derived overlap/precedence test case."},
+      {"assertion": "Keeps legacy compatibility policy in application scope rather than requiring it in generic Archodin APIs.", "reason": "Both runs pass: the candidate explicitly draws the library boundary, while the baseline confines all changes to the existing router/HTTP boundary and never requires generic API changes. If a positive generic/application seam explanation is essential, require it explicitly rather than treating router-local scope as a failure."},
+      {"reason": "All legacy assertions pass both configurations. A more discriminating scenario would provide a concrete observable compatibility conflict and require retaining its oracle-backed response, attempt ordering and state transition while changing internal error representation."}
+    ],
+    "overall": "4/4 for maintenance guidance. This run gives a clearer explicit application/library boundary, but the assertions do not distinguish it numerically from the baseline. No Python parity, repository-policy accuracy or runtime correctness is established by these planning scores."
+  }
+}

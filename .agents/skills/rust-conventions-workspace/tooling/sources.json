@@ -1,0 +1,17 @@
+[
+  {
+    "path": "eval-viewer/generate_review.py",
+    "url": "https://raw.githubusercontent.com/anthropics/skills/main/skills/skill-creator/eval-viewer/generate_review.py",
+    "sha256": "fc9d1b9243fe5ab6012ebd579bd76d0035de1b79fd3b969de114defab26478fb"
+  },
+  {
+    "path": "eval-viewer/viewer.html",
+    "url": "https://raw.githubusercontent.com/anthropics/skills/main/skills/skill-creator/eval-viewer/viewer.html",
+    "sha256": "a53213426ee1100441d701a3a0d49cda7a842f992d2c36463f4d3cc0258575fa"
+  },
+  {
+    "path": "scripts/aggregate_benchmark.py",
+    "url": "https://raw.githubusercontent.com/anthropics/skills/main/skills/skill-creator/scripts/aggregate_benchmark.py",
+    "sha256": "123ef128ea5ccc01a4b1ac212ef5567f21e9c13d3d240609780beeb3200c49aa"
+  }
+]

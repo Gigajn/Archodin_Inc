@@ -1,0 +1,49 @@
+{
+  "expectations": [
+    {
+      "text": "Explicitly preserves NO_KEYS, ALL_COOLDOWN, ALL_FAILED and UNKNOWN_CLUSTER in the legacy router.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'Before changing code, document the existing conditions and precedence for `NO_KEYS`, `ALL_COOLDOWN`, `ALL_FAILED`, and `UNKNOWN_CLUSTER`.' It requires 'exact public error codes' and 'explicit variants for the four domain outcomes', with mapping to the 'existing Python-compatible status and body'. This explicitly retains the four compatibility outcomes rather than replacing them."
+    },
+    {
+      "text": "Uses the existing Python oracle/contract to determine exact conditions and ordering instead of inventing parity semantics.",
+      "passed": true,
+      "evidence": "outputs/answer.md says 'Router implementation, Python behavior, and existing tests were not inspected, so the details below require characterization before implementation.' Under 'Establish the compatibility contract' it requires documenting existing conditions/precedence and capturing response status, payload, routing order, fallback and cooldown transitions. It explicitly says 'do not assume whether an unknown cluster or absent keys takes precedence.' This substantively proposes characterizing the existing Python compatibility contract rather than inventing semantics, even without naming an oracle artifact. No actual oracle use is verified."
+    },
+    {
+      "text": "Proposes public-surface offline parity tests using injected transport and typed errors.",
+      "passed": true,
+      "evidence": "outputs/answer.md: 'Inject transport through a trait and scripted fake; keep production routing decisions in the router, not the fake.' Tests 'Assert typed variants internally; assert exact public codes and response shapes at the compatibility boundary' and 'Verify attempt order and state changes, not merely final results'. Fixtures 'require no external service or environment credentials'. This tests observable routing and compatibility through an offline seam."
+    },
+    {
+      "text": "Keeps legacy compatibility policy in application scope rather than requiring it in generic Archodin APIs.",
+      "passed": true,
+      "evidence": "outputs/answer.md confines the plan to the existing application: 'Scope: Preserve observable behavior; do not redesign routing or introduce dependencies', 'Use a `thiserror` enum at the router boundary', and 'At the HTTP boundary, explicitly map typed outcomes to the existing Python-compatible status and body.' No generic Archodin Provider/Tool contract or library-wide legacy code requirement is proposed. This is a scoped-behavior pass, not evidence of an explicit library/application architecture discussion."
+    }
+  ],
+  "summary": {"passed": 4, "failed": 0, "total": 4, "pass_rate": 1.0},
+  "timing": {"total_tokens": null, "duration_ms": null, "total_duration_seconds": null, "note": "Zed spawn_agent returned no token or timing metrics; unknown, not zero."},
+  "claims": [
+    {
+      "claim": "The exact Python compatibility behavior and available transport/time facilities remain unknown.",
+      "type": "process",
+      "verified": true,
+      "evidence": "outputs/answer.md says 'Router implementation, Python behavior, and existing tests were not inspected'. transcript.md lists 'Actual router types, transport interface, error precedence, Python response mappings, retry policy, and cooldown semantics' as unknown. The plan does not assert concrete meanings or precedence for the four codes."
+    },
+    {
+      "claim": "No implementation, builds or tests were performed for this evaluation.",
+      "type": "process",
+      "verified": true,
+      "evidence": "outputs/answer.md: 'No implementation, builds, or tests were performed for this evaluation.' transcript.md records 'No network access, dependency operations, builds, tests, or runtime execution were performed' and distinguishes a local repository-status check. The records agree; no independent execution audit was performed."
+    }
+  ],
+  "eval_feedback": {
+    "suggestions": [
+      {"assertion": "Uses the existing Python oracle/contract to determine exact conditions and ordering instead of inventing parity semantics.", "reason": "This passes for a characterization-first plan, not for actual oracle execution. The baseline does not identify a specific oracle artifact or differential comparison procedure. Require an explicit source-of-truth fixture and one derived precedence test if that extra operational specificity is important; do not fail solely for absence of the word 'oracle'."},
+      {"assertion": "Keeps legacy compatibility policy in application scope rather than requiring it in generic Archodin APIs.", "reason": "Router/HTTP-local scope satisfies the assertion as written even though the baseline never explicitly explains the generic Archodin boundary. To discriminate positive boundary knowledge from non-contamination, require naming the application-owned mapping seam and describing what a generic Provider error must not inherit."},
+      {"reason": "The opening 'do not ... introduce dependencies' and later 'Use a `thiserror` enum' are not fully reconciled because availability of thiserror was not inspected. The plan allows reusing an existing equivalent type, but should explicitly condition macro use on an existing dependency. No current assertion checks feasibility of dependency-preserving maintenance."},
+      {"reason": "All legacy assertions pass both runs. Neither has observed Python behavior, so these scores cannot establish parity or justify claims of measured improvement. Supply a small compatibility fixture to make the guidance assessment more discriminating."}
+    ],
+    "overall": "4/4 on the assertions as planning behavior. The baseline is less explicit about the oracle artifact and library boundary, but neither omission contradicts the scoped maintenance plan. Exact conditions, response mappings, precedence and implementation correctness remain unverified."
+  }
+}
