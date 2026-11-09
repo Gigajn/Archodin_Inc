@@ -1,0 +1,6 @@
+{
+  "total_tokens": null,
+  "duration_ms": null,
+  "total_duration_seconds": null,
+  "note": "Zed spawn_agent returned no token or timing metrics; unknown, not zero."
+}

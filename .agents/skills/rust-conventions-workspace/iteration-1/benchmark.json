@@ -1,0 +1,310 @@
+{
+  "metadata": {
+    "skill_name": "rust-conventions",
+    "skill_path": "/home/kudo/Projects/Archodin_inc/.agents/skills/rust-conventions-workspace/candidate",
+    "executor_model": "unknown (configured Zed subagent default)",
+    "analyzer_model": "unknown (configured Zed subagent default)",
+    "timestamp": "2026-11-02T21:42:23.516178+00:00",
+    "evals_run": [
+      1,
+      2,
+      3
+    ],
+    "runs_per_configuration": 1
+  },
+  "runs": [
+    {
+      "eval_id": 1,
+      "eval_name": "generic-provider",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "passed": 4,
+        "failed": 0,
+        "total": 4,
+        "pass_rate": 1.0,
+        "time_seconds": null,
+        "tokens": null,
+        "tool_calls": null,
+        "errors": null
+      },
+      "expectations": [
+        {
+          "text": "Proposes a vendor-independent public Provider request/response contract and actionable typed error variants.",
+          "passed": true,
+          "evidence": "outputs/answer.md: `pub trait Provider: Send + Sync` declares associated `Request`, `Response`, and `Error` types and returns `Result<Self::Response, Self::Error>`. The design says, 'Requests and responses own their boundary data' and proposes 'invalid configuration, unsupported operation, timeout, rate limiting with optional retry delay, and backend failure with a retained typed source.' This is a concrete integration-neutral boundary with actionable failure categories; associated payload types intentionally leave the operation domain open."
+        },
+        {
+          "text": "Does not impose legacy routing codes or employee persistence on the generic library.",
+          "passed": true,
+          "evidence": "outputs/answer.md explicitly says '`NO_KEYS`, `ALL_COOLDOWN`, `ALL_FAILED`, and `UNKNOWN_CLUSTER` describe its application, not a generic provider; introduce them only if that domain is explicitly required.' The proposed core contract contains no employee model or persistence requirement."
+        },
+        {
+          "text": "Keeps integration dependencies undecided; named crates are conditional options rather than required additions.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'No integration SDK, transport, credentials scheme, or provider-specific payload is selected.' It uses standard-library trait types; '`thiserror` can be an adapter choice' and 'a Tokio adapter can use Tokio timeouts without imposing Tokio on the core.' These are conditional adapter options, not dependency additions."
+        },
+        {
+          "text": "Proposes deterministic offline tests through the public Provider boundary without credentials or inference spend.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'Consumers depend on `P: Provider`, allowing a fake wherever a real adapter would be used' and 'Use deterministic offline fakes and injected transports.' Planned cases include 'successful response, typed failure propagation, timeout, rate-limit metadata, cancellation cleanup, and no implicit retry'; 'Keep optional live-service tests explicitly ignored by default.' In combination these describe public-boundary, offline tests rather than paid/credentialed service calls."
+        }
+      ],
+      "notes": [
+        "Design/guidance evaluation only; no compiled runtime evidence."
+      ]
+    },
+    {
+      "eval_id": 2,
+      "eval_name": "typed-tool-async",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "passed": 5,
+        "failed": 0,
+        "total": 5,
+        "pass_rate": 1.0,
+        "time_seconds": null,
+        "tokens": null,
+        "tool_calls": null,
+        "errors": null
+      },
+      "expectations": [
+        {
+          "text": "Validates structured Tool input before effects and returns typed output/failure through a public Tool boundary.",
+          "passed": true,
+          "evidence": "outputs/answer.md defines a Tool with associated `Input`/`Output` and `Result<Output, ToolError>`. Its AddTool example says 'validation constructs `AddInput` with documented bounds' and 'Invalid input must fail before invoking the execution adapter or consuming a scripted step.' `AddOutput { sum }`, checked addition, and structured `InvalidInput { field, reason }`/`Overflow` failures make the validation ordering and typed result concrete."
+        },
+        {
+          "text": "Uses an injected scripted fake and offline behavioral tests, including a deterministic hanging operation.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'Inject a `ScriptedTool` implementing the same contract' with `Return`, `Fail`, and `Hang` FIFO steps. '`Hang` acknowledges entry through a synchronization signal, then awaits a never-ready future.' Tests 'await the entry signal, advance a controlled clock where needed, and assert the exact error variant plus the cleanup signal. Avoid wall-clock sleeps.' This is a deterministic no-I/O behavioral seam, not an actual hanging service call."
+        },
+        {
+          "text": "Uses the caller Tokio runtime with explicit deadline and cancellation outcomes.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'Reuse the caller\u2019s Tokio runtime.' The context carries 'an absolute deadline and a caller-controlled cancellation signal'; the runner 'races execution against cancellation and the remaining absolute deadline' and defines `DeadlineExceeded` and `Cancelled` errors. It also calls for an explicit simultaneous-readiness precedence policy."
+        },
+        {
+          "text": "Explains how owned work is stopped/joined and does not equate dropping a future with stopping remote or arbitrary blocking work.",
+          "passed": true,
+          "evidence": "outputs/answer.md limits its local drop-cleanup claim: 'This fake spawns no tasks and performs no I/O, so dropping that future fully cleans up its owned work.' It separately says 'Dropping execution does not stop remote computation' and requires adapters to 'propagate cancellation and stop/join tasks or terminate/reap processes before reporting completion.' It excludes blocking work from the fake, rather than claiming future drop stops arbitrary blocking work."
+        },
+        {
+          "text": "Does not impose company employee models or legacy routing codes on the generic Tool.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'Keep this an Archodin library mechanism: no Basileia workflows, company agents, or persistence policy.' The arithmetic Tool, runner, fake, and errors introduce neither employee models nor legacy router codes."
+        }
+      ],
+      "notes": [
+        "Design/guidance evaluation only; no compiled runtime evidence."
+      ]
+    },
+    {
+      "eval_id": 3,
+      "eval_name": "legacy-router",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "passed": 4,
+        "failed": 0,
+        "total": 4,
+        "pass_rate": 1.0,
+        "time_seconds": null,
+        "tokens": null,
+        "tool_calls": null,
+        "errors": null
+      },
+      "expectations": [
+        {
+          "text": "Explicitly preserves NO_KEYS, ALL_COOLDOWN, ALL_FAILED and UNKNOWN_CLUSTER in the legacy router.",
+          "passed": true,
+          "evidence": "outputs/answer.md requires a parity matrix for '`NO_KEYS`, `ALL_COOLDOWN`, `ALL_FAILED` and `UNKNOWN_CLUSTER`' and says 'Preserve verified codes, status, serialization and any contractually observable message text.' This explicitly preserves all four compatibility outcomes while leaving their uninspected semantics unresolved."
+        },
+        {
+          "text": "Uses the existing Python oracle/contract to determine exact conditions and ordering instead of inventing parity semantics.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'Before editing, obtain the approved maintenance ticket, existing public router contract and Python oracle.' The matrix must record 'exact triggering conditions, precedence when conditions overlap, routing/fallback order, and public response shape'. It warns 'Their names alone do not establish their meanings' and says the details 'remain unresolved'. This passes as an oracle-first plan, not as an executed comparison."
+        },
+        {
+          "text": "Proposes public-surface offline parity tests using injected transport and typed errors.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'Exercise the public router through an injected scripted transport' and 'Assert typed variants at the Rust contract and exact compatibility responses at the application boundary'. It covers overlap precedence, routing/fallback and error mapping, proposes sanitized adapter protocol fixtures, and states 'Default tests require no keys, network or inference spend'."
+        },
+        {
+          "text": "Keeps legacy compatibility policy in application scope rather than requiring it in generic Archodin APIs.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'Maintain the existing AAHC Python-parity router as application code; do not migrate it or introduce application policy into Archodin's generic Provider APIs.' It requires an 'application-owned typed router error enum' and says to keep 'legacy codes out of generic Provider errors'. This explicitly separates compatibility policy from library mechanisms."
+        }
+      ],
+      "notes": [
+        "Design/guidance evaluation only; no compiled runtime evidence."
+      ]
+    },
+    {
+      "eval_id": 1,
+      "eval_name": "generic-provider",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "passed": 4,
+        "failed": 0,
+        "total": 4,
+        "pass_rate": 1.0,
+        "time_seconds": null,
+        "tokens": null,
+        "tool_calls": null,
+        "errors": null
+      },
+      "expectations": [
+        {
+          "text": "Proposes a vendor-independent public Provider request/response contract and actionable typed error variants.",
+          "passed": true,
+          "evidence": "outputs/answer.md proposes `complete(&self, request: CompletionRequest, context: OperationContext)` returning `Result<CompletionResponse, ProviderError>`, specifies message/content/tool/usage fields, and says 'Use library-owned structured values, not SDK types.' Errors include `InvalidRequest`, `UnsupportedCapability`, `RateLimited { retry_after }`, `DeadlineExceeded`, `Cancelled`, `Transport`, and `InvalidResponse`, with safe structured identifiers. This supplies concrete vendor-independent data and failure semantics."
+        },
+        {
+          "text": "Does not impose legacy routing codes or employee persistence on the generic library.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'Archodin owns generic mechanisms; Basileia supplies company agents, prompts, workflows, secrets and retry policy.' The proposed completion contract and ProviderError contain no legacy router codes or employee persistence requirement."
+        },
+        {
+          "text": "Keeps integration dependencies undecided; named crates are conditional options rather than required additions.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'No integration dependency is selected; langchain-rust is only a candidate.' It describes boxed standard-library futures 'without requiring async-trait' and leaves context implementation/runtime integration undecided. It requires compatibility review before selecting dependencies rather than assuming it is complete."
+        },
+        {
+          "text": "Proposes deterministic offline tests through the public Provider boundary without credentials or inference spend.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'Develop one public behavior red\u2192green at a time using scripted adapters: response preservation, unsupported requests, error variants, missing usage, and secret redaction.' It adds 'controlled clocks and synchronization for deadlines, cancellation, bounded concurrency and owned-work cleanup' and explicitly says 'Default tests need no network, credentials or inference spend.'"
+        }
+      ],
+      "notes": [
+        "Design/guidance evaluation only; no compiled runtime evidence."
+      ]
+    },
+    {
+      "eval_id": 2,
+      "eval_name": "typed-tool-async",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "passed": 4,
+        "failed": 1,
+        "total": 5,
+        "pass_rate": 0.8,
+        "time_seconds": null,
+        "tokens": null,
+        "tool_calls": null,
+        "errors": null
+      },
+      "expectations": [
+        {
+          "text": "Validates structured Tool input before effects and returns typed output/failure through a public Tool boundary.",
+          "passed": false,
+          "evidence": "outputs/answer.md provides associated `Input`/`Output`, `Result<Output, ToolError>`, and an `InvalidInput` variant, but never defines validation or places it before adapter invocation/effects. Its fake will 'record the call and remove its step in a short scope'; checking expected input and returning `UnexpectedCall` is script verification, not production input validation. No planned test checks invalid input causes no execution. Typed results satisfy only part of this combined assertion."
+        },
+        {
+          "text": "Uses an injected scripted fake and offline behavioral tests, including a deterministic hanging operation.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'Inject `ScriptedTool` with a FIFO `VecDeque<Step>`' carrying expected typed input and `Return`, `Fail`, or `Hang`. '`Hang` awaits `std::future::pending()` without blocking a thread or spawning a task.' The plan calls for offline success/failure/exhaustion/hang/cancellation tests, paused time where available, and 'Synchronize on fake entry before advancing time or cancelling.' The hanging operation itself is deterministic; the optional real-time fallback weakens deadline-test determinism and is noted separately."
+        },
+        {
+          "text": "Uses the caller Tokio runtime with explicit deadline and cancellation outcomes.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'The runner owns the time budget and a per-work-unit `CancellationToken`. Race cancellation against `tokio::time::timeout(limit, tool.call(input))`, mapping outcomes to typed variants.' Those variants include `TimedOut { limit: Duration }` and `Cancelled`. 'Keep the call future inline' describes execution in the ambient caller Tokio context, not construction of a nested runtime. This is a relative per-call deadline, not the candidate's absolute-deadline context."
+        },
+        {
+          "text": "Explains how owned work is stopped/joined and does not equate dropping a future with stopping remote or arbitrary blocking work.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'Dropping a future does not undo remote effects or stop already-running blocking work; mutating tools need an explicit idempotency/reconciliation policy.' It keeps execution inline and requires cancellation-safe implementations; 'Any necessary child tasks inherit the token and are joined during shutdown.' Thus cancellation propagation and joining are stated without promising arbitrary work stops on drop."
+        },
+        {
+          "text": "Does not impose company employee models or legacy routing codes on the generic Tool.",
+          "passed": true,
+          "evidence": "outputs/answer.md limits its domain advice: 'Preserve existing domain error codes when applicable; their relevance to this Tool is unspecified.' It introduces no employee model, persistence policy, or mandatory legacy code. The conditional compatibility note is not an imposition on this generic Tool."
+        }
+      ],
+      "notes": [
+        "Design/guidance evaluation only; no compiled runtime evidence."
+      ]
+    },
+    {
+      "eval_id": 3,
+      "eval_name": "legacy-router",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "passed": 4,
+        "failed": 0,
+        "total": 4,
+        "pass_rate": 1.0,
+        "time_seconds": null,
+        "tokens": null,
+        "tool_calls": null,
+        "errors": null
+      },
+      "expectations": [
+        {
+          "text": "Explicitly preserves NO_KEYS, ALL_COOLDOWN, ALL_FAILED and UNKNOWN_CLUSTER in the legacy router.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'Before changing code, document the existing conditions and precedence for `NO_KEYS`, `ALL_COOLDOWN`, `ALL_FAILED`, and `UNKNOWN_CLUSTER`.' It requires 'exact public error codes' and 'explicit variants for the four domain outcomes', with mapping to the 'existing Python-compatible status and body'. This explicitly retains the four compatibility outcomes rather than replacing them."
+        },
+        {
+          "text": "Uses the existing Python oracle/contract to determine exact conditions and ordering instead of inventing parity semantics.",
+          "passed": true,
+          "evidence": "outputs/answer.md says 'Router implementation, Python behavior, and existing tests were not inspected, so the details below require characterization before implementation.' Under 'Establish the compatibility contract' it requires documenting existing conditions/precedence and capturing response status, payload, routing order, fallback and cooldown transitions. It explicitly says 'do not assume whether an unknown cluster or absent keys takes precedence.' This substantively proposes characterizing the existing Python compatibility contract rather than inventing semantics, even without naming an oracle artifact. No actual oracle use is verified."
+        },
+        {
+          "text": "Proposes public-surface offline parity tests using injected transport and typed errors.",
+          "passed": true,
+          "evidence": "outputs/answer.md: 'Inject transport through a trait and scripted fake; keep production routing decisions in the router, not the fake.' Tests 'Assert typed variants internally; assert exact public codes and response shapes at the compatibility boundary' and 'Verify attempt order and state changes, not merely final results'. Fixtures 'require no external service or environment credentials'. This tests observable routing and compatibility through an offline seam."
+        },
+        {
+          "text": "Keeps legacy compatibility policy in application scope rather than requiring it in generic Archodin APIs.",
+          "passed": true,
+          "evidence": "outputs/answer.md confines the plan to the existing application: 'Scope: Preserve observable behavior; do not redesign routing or introduce dependencies', 'Use a `thiserror` enum at the router boundary', and 'At the HTTP boundary, explicitly map typed outcomes to the existing Python-compatible status and body.' No generic Archodin Provider/Tool contract or library-wide legacy code requirement is proposed. This is a scoped-behavior pass, not evidence of an explicit library/application architecture discussion."
+        }
+      ],
+      "notes": [
+        "Design/guidance evaluation only; no compiled runtime evidence."
+      ]
+    }
+  ],
+  "run_summary": {
+    "with_skill": {
+      "pass_rate": {
+        "mean": 1.0,
+        "stddev": 0.0,
+        "min": 1.0,
+        "max": 1.0
+      },
+      "time_seconds": null,
+      "tokens": null
+    },
+    "without_skill": {
+      "pass_rate": {
+        "mean": 0.9333333333333333,
+        "stddev": 0.11547005383792512,
+        "min": 0.8,
+        "max": 1.0
+      },
+      "time_seconds": null,
+      "tokens": null
+    },
+    "delta": {
+      "pass_rate": "+0.0667",
+      "time_seconds": null,
+      "tokens": null
+    }
+  },
+  "notes": [
+    "with_skill = candidate; without_skill = preserved old_skill baseline. Active skill remains unchanged pending owner review.",
+    "One run per scenario/configuration; dispersion across three different scenarios is not repeatability evidence or statistical significance.",
+    "Candidate passes 13/13 assertions; baseline passes 12/13. Provider and legacy cases tie. The Tool baseline does not specify validation before effects.",
+    "Most assertions pass in both configurations and do not discriminate their quality in these samples. Legacy parity is a proposed characterization plan, not verified runtime parity.",
+    "The baseline Tool plan also leaves domain-code relevance unresolved and offers bounded wall-clock fallback; these are qualitative limitations, not extra scored failures.",
+    "Token usage, run durations and full execution tool counts are unavailable from Zed spawn_agent; unknown fields remain null and time/token aggregates are omitted from display.",
+    "Manual schema-compatible aggregation preserves unknown values. The downloaded upstream aggregator expects run-* subdirectories and substitutes zero/output characters for missing metrics, so it was inspected but not executed.",
+    "The viewer uses the official generator. External font links and the unused XLSX CDN script are removed from its generated HTML for offline review; upstream source files remain intact."
+  ]
+}
