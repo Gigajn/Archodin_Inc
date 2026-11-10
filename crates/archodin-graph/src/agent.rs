@@ -16,7 +16,7 @@ use langchain_rust::llm::openai::{OpenAI, OpenAIConfig};
 use langchain_rust::schemas::{FunctionDefinition, Message};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::chain::{ChainEvent, ModelChain, ModelPair};
 use crate::GraphBuilder;
@@ -110,11 +110,20 @@ impl Provider {
         )
     }
 
-    /// Hides a vault secret's value from error text.
+    /// Hides this Provider's API key from error text, whatever its source:
+    /// a Vault secret is scrubbed by the vault, and a key set directly is
+    /// scrubbed here, so neither can leak into an error, an event or a log
+    /// (KR-06/SD-08). An empty key redacts nothing.
     pub(crate) fn redact(&self, text: String) -> String {
         match &self.api_key {
             KeySource::Vault(vault, _) => vault.redact(&text),
-            KeySource::Fixed(_) => text,
+            KeySource::Fixed(key) => {
+                if key.is_empty() {
+                    text
+                } else {
+                    text.replace(key.as_str(), "[redacted]")
+                }
+            }
         }
     }
 
@@ -202,8 +211,11 @@ impl AgentTool {
     /// Wraps a [`TypedTool`], generating its parameter schema from the input type.
     pub fn typed<T: TypedTool>(tool: T) -> Self {
         let tool = Arc::new(tool);
+        // A schema generated from a `JsonSchema` type always converts to JSON;
+        // the fallback keeps the tool usable with an empty object schema
+        // instead of panicking the job if that ever stops holding.
         let mut parameters = serde_json::to_value(schemars::schema_for!(T::Input))
-            .expect("a schema is always valid JSON");
+            .unwrap_or_else(|_| json!({"type": "object"}));
         if let Some(object) = parameters.as_object_mut() {
             object.remove("$schema");
         }
@@ -363,7 +375,12 @@ impl AgentNode {
                     u64::from(t.completion_tokens),
                     0.0,
                 );
-                usage.add(self.chain.provider(current).priced(used));
+                let priced = self
+                    .chain
+                    .provider(current)
+                    .map(|p| p.priced(used))
+                    .unwrap_or(used);
+                usage.add(priced);
             }
             if result.tool_calls.is_empty() {
                 let turns = vec![
