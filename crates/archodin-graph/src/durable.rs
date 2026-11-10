@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 
+use crate::locks::mutex;
 use crate::{Edge, Graph, GraphBuilder, GraphError, JobEvent, RunOptions, StoreError, END};
 
 /// A saved copy of the State after a step.
@@ -81,12 +82,10 @@ impl<S> Default for InMemoryCheckpointStore<S> {
 
 impl<S: Clone + Send + 'static> CheckpointStore<S> for InMemoryCheckpointStore<S> {
     fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, Result<(), StoreError>> {
-        // A poisoned lock is recovered (the repo's established pattern:
-        // `unwrap_or_else(|e| e.into_inner())`); the in-memory store has
-        // no other failure mode, so it always reports `Ok`.
-        self.saved
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        // A poisoned lock is recovered by `locks::mutex` (KR-11); the
+        // in-memory store has no other failure mode, so it always
+        // reports `Ok`.
+        mutex(&self.saved)
             .entry(checkpoint.job.clone())
             .or_default()
             .push(checkpoint);
@@ -94,10 +93,7 @@ impl<S: Clone + Send + 'static> CheckpointStore<S> for InMemoryCheckpointStore<S
     }
 
     fn checkpoints(&self, job: &str) -> BoxFuture<'_, Result<Vec<Checkpoint<S>>, StoreError>> {
-        let found = self
-            .saved
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        let found = mutex(&self.saved)
             .get(job)
             .cloned()
             .unwrap_or_default();
@@ -151,17 +147,14 @@ impl ScriptedApprover {
 
     /// Every request received so far.
     pub fn requests(&self) -> Vec<ApprovalRequest> {
-        self.asked.lock().unwrap().clone()
+        mutex(&self.asked).clone()
     }
 }
 
 impl Approver for ScriptedApprover {
     fn decide(&self, request: &ApprovalRequest) -> BoxFuture<'_, ApprovalDecision> {
-        self.asked.lock().unwrap().push(request.clone());
-        let decision = self
-            .script
-            .lock()
-            .unwrap()
+        mutex(&self.asked).push(request.clone());
+        let decision = mutex(&self.script)
             .pop_front()
             .unwrap_or(ApprovalDecision::Pending);
         Box::pin(async move { decision })
@@ -207,21 +200,25 @@ enum Phase<S> {
 }
 
 impl<S: Clone + Send + 'static> Graph<S> {
-    /// The Node after `_node` given the State; `None` ends the Job.
-    fn next_after(&self, node: &str, state: &S) -> Option<String> {
+    /// The Node after `node` given the State; `None` ends the Job. A router
+    /// that returns a target outside its declared list fails the Job with
+    /// [`GraphError::UnknownConditionalTarget`] instead of panicking.
+    fn next_after(&self, node: &str, state: &S) -> Result<Option<String>, GraphError> {
         let next = match self.inner.edges.get(node) {
             None => END,
             Some(Edge::To(t)) => t.as_str(),
             Some(Edge::Conditional { router, targets }) => {
                 let chosen = router(state);
-                assert!(
-                    targets.iter().any(|t| t == chosen),
-                    "conditional edge from `{node}` returned undeclared target `{chosen}`"
-                );
+                if !targets.iter().any(|t| t == chosen) {
+                    return Err(GraphError::UnknownConditionalTarget {
+                        node: node.to_string(),
+                        target: chosen.to_string(),
+                    });
+                }
                 chosen
             }
         };
-        (next != END).then(|| next.to_string())
+        Ok((next != END).then(|| next.to_string()))
     }
 
     /// Streams a durable Job: Checkpoints are written as it goes, and an
@@ -329,8 +326,21 @@ impl<S: Clone + Send + 'static> Graph<S> {
                         ))
                     }
                     Phase::Run { state, node, step } => {
-                        let updated = (self.inner.nodes[&node])(state).await;
-                        let next = self.next_after(&node, &updated);
+                        let Some(node_fn) = self.inner.nodes.get(&node) else {
+                            return Some((
+                                JobEvent::JobFailed {
+                                    error: GraphError::UnknownEdgeNode(node.clone()),
+                                },
+                                Phase::Done,
+                            ));
+                        };
+                        let updated = node_fn(state).await;
+                        let next = match self.next_after(&node, &updated) {
+                            Ok(next) => next,
+                            Err(error) => {
+                                return Some((JobEvent::JobFailed { error }, Phase::Done));
+                            }
+                        };
                         if let Err(error) = store
                             .save(Checkpoint {
                                 job: job.clone(),
@@ -406,10 +416,11 @@ impl<S: Clone + Send + 'static> Graph<S> {
                 JobEvent::CheckpointFailed { error } => {
                     return Err(GraphError::CheckpointFailed(error))
                 }
+                JobEvent::JobFailed { error } => return Err(error),
                 // Any other event is progress, not an ending: keep consuming
                 // the stream. This list is explicit on purpose — a new
                 // terminal variant must get its own arm here instead of
-                // being swallowed silently (KR-04, K-06).
+                // being swallowed silently (KR-04, KR-06).
                 JobEvent::JobStarted
                 | JobEvent::NodeStarted { .. }
                 | JobEvent::NodeFinished { .. }
@@ -417,6 +428,7 @@ impl<S: Clone + Send + 'static> Graph<S> {
                 | JobEvent::Decision { .. } => {}
             }
         }
-        unreachable!("a durable Job stream always ends with a closing event")
+        Err(GraphError::StreamEnded)
     }
 }
+
