@@ -24,9 +24,25 @@
 //! - `POST /api/roles/{role}/approve-all|reject-all`
 //! - `GET /api/usage` token use and cost per Agent and per Job
 //!
-//! With [`AgoraBuilder::auth`] every route, including unknown paths, needs a login
-//! session (cookie or bearer token, see [`Auth`]). Without it the router is open,
-//! which is only for tests and trusted local use.
+//! Auth is required by default: [`AgoraBuilder::build`] panics unless a login is
+//! configured with [`AgoraBuilder::auth`]. Every route, including unknown paths,
+//! then needs a login session (cookie or bearer token, see [`Auth`]). The only
+//! way to run without a login is the explicit opt-out
+//! [`AgoraBuilder::insecure_no_auth`], which is only for tests and trusted local
+//! use — never for a console reachable from a network.
+//!
+//! ```rust
+//! # use archodin_console::{Agora, Auth, hash_password};
+//! # use archodin_graph::Vault;
+//! # let vault = Vault::new([0; 32]);
+//! # vault.put("agora/username", "kudo");
+//! # vault.put("agora/password_hash", &hash_password("pw"));
+//! # let auth = Auth::from_vault(&vault, "agora/username", "agora/password_hash").unwrap();
+//! let agora = Agora::builder()
+//!     .runner(|_| Box::pin(async {}))
+//!     .auth(auth)
+//!     .build();
+//! ```
 //!
 //! With [`AgoraBuilder::notifier`] a new pending approval is sent to the person by
 //! Telegram or email, with a link to it; approvals that arrive within the
@@ -314,6 +330,9 @@ struct Inner {
     agents: Vec<String>,
     max_running: usize,
     auth: Option<Auth>,
+    max_jobs: usize,
+    max_approvals: usize,
+    max_events_per_job: usize,
     notifiers: Vec<Arc<dyn Notifier>>,
     notify_window: Duration,
     public_url: String,
@@ -343,6 +362,10 @@ pub struct AgoraBuilder {
     agents: Vec<String>,
     max_running: usize,
     auth: Option<Auth>,
+    insecure_no_auth: bool,
+    max_jobs: usize,
+    max_approvals: usize,
+    max_events_per_job: usize,
     notifiers: Vec<Arc<dyn Notifier>>,
     notify_window: Duration,
     public_url: String,
@@ -389,9 +412,60 @@ impl AgoraBuilder {
         self
     }
 
-    /// Requires a login session on every page and API call.
+    /// Requires a login session on every page and API call. This is the
+    /// default: [`AgoraBuilder::build`] panics without either this or
+    /// [`AgoraBuilder::insecure_no_auth`], so an open router is always a
+    /// deliberate choice, never a forgotten call.
+    ///
+    /// The per-IP part of the login lockout only works when the router is
+    /// served with `into_make_service_with_connect_info` — see
+    /// [`Agora::router`].
     pub fn auth(mut self, auth: Auth) -> Self {
         self.auth = Some(auth);
+        self
+    }
+
+    /// Runs the router with NO login at all: anyone who can reach it can
+    /// submit Jobs and approve anything.
+    ///
+    /// Only for tests and trusted local use (for example a console bound to
+    /// localhost that no other machine can reach). Never for a console
+    /// reachable from a network. Has no effect when [`.auth()`](Self::auth)
+    /// is also set: the login wins and the router stays protected.
+    pub fn insecure_no_auth(mut self) -> Self {
+        self.insecure_no_auth = true;
+        self
+    }
+
+    /// The most Jobs kept at once (default 1000). When the table is full, the
+    /// oldest finished Job is evicted to make room; if every slot is busy,
+    /// [`Agora::submit`] refuses the new Job instead of growing without bound.
+    ///
+    /// Paused Jobs count toward the cap and are never evicted — only finished,
+    /// rejected, failed or cancelled Jobs are. A table full of Paused Jobs
+    /// therefore refuses new Jobs until the operator cancels one; that is
+    /// fail-closed by design, not a leak.
+    pub fn max_jobs(mut self, n: usize) -> Self {
+        self.max_jobs = n.max(1);
+        self
+    }
+
+    /// The most pending approvals kept at once (default 1000). When the list
+    /// is full, the oldest pending approval is evicted to make room; the
+    /// eviction is logged to stderr.
+    ///
+    /// An evicted approval simply disappears: the Job waiting on it stays
+    /// Paused — it is never resumed by the eviction — until the approval is
+    /// asked for again or the operator cancels the Job.
+    pub fn max_approvals(mut self, n: usize) -> Self {
+        self.max_approvals = n.max(1);
+        self
+    }
+
+    /// The most events kept per Job (default 1000). Older events are dropped,
+    /// newest first kept, so a chatty Job cannot grow memory without bound.
+    pub fn max_events_per_job(mut self, n: usize) -> Self {
+        self.max_events_per_job = n.max(1);
         self
     }
 
@@ -419,8 +493,15 @@ impl AgoraBuilder {
     /// Builds the Agora.
     ///
     /// # Panics
-    /// Panics if no runner was set.
+    /// Panics if no runner was set, or if no login was configured and
+    /// [`AgoraBuilder::insecure_no_auth`] was not called.
     pub fn build(self) -> Agora {
+        if self.auth.is_none() && !self.insecure_no_auth {
+            panic!(
+                "the Agora needs a login: call `.auth(...)` with an `Auth`, or \
+                 `.insecure_no_auth()` only for tests and trusted local use"
+            );
+        }
         Agora {
             inner: Arc::new(Inner {
                 state: Mutex::new(State_ {
@@ -439,12 +520,58 @@ impl AgoraBuilder {
                 agents: self.agents,
                 max_running: self.max_running,
                 auth: self.auth,
+                max_jobs: self.max_jobs,
+                max_approvals: self.max_approvals,
+                max_events_per_job: self.max_events_per_job,
                 notifiers: self.notifiers,
                 notify_window: self.notify_window,
                 public_url: self.public_url,
                 notes: Mutex::new(Notes::default()),
             }),
         }
+    }
+}
+
+/// Default cap for stored Jobs, pending approvals and events kept per Job
+/// (KR-08). All three can be tuned on the builder; see
+/// [`AgoraBuilder::max_jobs`], [`AgoraBuilder::max_approvals`] and
+/// [`AgoraBuilder::max_events_per_job`].
+const DEFAULT_MAX_JOBS: usize = 1000;
+const DEFAULT_MAX_APPROVALS: usize = 1000;
+const DEFAULT_MAX_EVENTS_PER_JOB: usize = 1000;
+
+/// Prefix of the error [`Agora::submit`] returns when the Job table is full
+/// and every slot is busy. The HTTP handler ([`submit_job`]) maps errors
+/// starting with this prefix to 429; keep the two sites on this constant so
+/// rewording the message cannot silently turn the 429 into a 400. A typed
+/// error is a follow-up, not part of this change.
+const TOO_MANY_JOBS: &str = "too many jobs";
+
+/// Drops a Job and every approval and remembered decision that names it, so
+/// evicting a Job never leaves dangling keys behind.
+fn evict_job(s: &mut State_, id: u64) {
+    s.jobs.remove(&id);
+    let name = job_name(id);
+    s.approvals.retain(|_, a| a.key.0 != name);
+    s.decided.retain(|k, _| k.0 != name);
+}
+
+/// Drops remembered decisions for Jobs that no longer exist, and caps the map
+/// so the full prompt strings it keys on cannot grow without bound.
+///
+/// The cap drops entries in arbitrary `HashMap` order, by design: dropping
+/// any entry is safe — the next `decide` for that question simply asks again
+/// instead of reusing the remembered answer.
+fn prune_decided(s: &mut State_, max: usize) {
+    s.decided.retain(|k, _| match job_number(&k.0) {
+        None => true,
+        Some(n) => s.jobs.contains_key(&n),
+    });
+    while s.decided.len() > max {
+        let Some(k) = s.decided.keys().next().cloned() else {
+            break;
+        };
+        s.decided.remove(&k);
     }
 }
 
@@ -467,6 +594,10 @@ impl Agora {
             agents: Vec::new(),
             max_running: 4,
             auth: None,
+            insecure_no_auth: false,
+            max_jobs: DEFAULT_MAX_JOBS,
+            max_approvals: DEFAULT_MAX_APPROVALS,
+            max_events_per_job: DEFAULT_MAX_EVENTS_PER_JOB,
             notifiers: Vec::new(),
             notify_window: Duration::from_secs(30),
             public_url: String::new(),
@@ -495,16 +626,37 @@ impl Agora {
                 _ => {}
             }
             job.events.push(update);
+            // KR-08: keep only the newest events, so a chatty Job cannot grow
+            // memory without bound.
+            if job.events.len() > self.inner.max_events_per_job {
+                let excess = job.events.len() - self.inner.max_events_per_job;
+                job.events.drain(..excess);
+            }
         }
         self.bump();
         self.start_queued();
     }
 
     /// Submits a Job: it is queued (Agora Jobs first) and started when there is room.
+    ///
+    /// Fails when the Job table is full and every slot is busy (see
+    /// [`AgoraBuilder::max_jobs`]); finished Jobs are evicted oldest-first
+    /// to make room before refusing.
     pub fn submit(&self, request: JobRequest) -> Result<u64, String> {
         request.validate()?;
         let id = {
             let mut s = mutex(&self.inner.state);
+            while s.jobs.len() >= self.inner.max_jobs {
+                let Some(oldest) = s
+                    .jobs
+                    .iter()
+                    .find(|(_, j)| j.status.is_terminal())
+                    .map(|(id, _)| *id)
+                else {
+                    return Err(format!("{TOO_MANY_JOBS}: all job slots are busy"));
+                };
+                evict_job(&mut s, oldest);
+            }
             let id = s.next_job;
             s.next_job += 1;
             s.jobs.insert(
@@ -728,6 +880,7 @@ impl Agora {
             match s.approvals.remove(&id) {
                 Some(a) => {
                     s.decided.insert(a.key, decision);
+                    prune_decided(&mut s, self.inner.max_approvals);
                     true
                 }
                 None => false,
@@ -755,6 +908,7 @@ impl Agora {
                     s.decided.insert(a.key, decision);
                 }
             }
+            prune_decided(&mut s, self.inner.max_approvals);
             ids.len()
         };
         self.after_decisions().await;
@@ -778,6 +932,16 @@ impl Agora {
     }
 
     /// The axum router serving the page and the API.
+    ///
+    /// # Client identity for the login limit
+    ///
+    /// The per-IP part of the login lockout (see [`Auth`]) only sees the real
+    /// client IP when the application serves this router with
+    /// `into_make_service_with_connect_info::<SocketAddr>()`. Served any other
+    /// way, every client looks like `"unknown"` and the limit applies per
+    /// username only — five bad guesses from anyone then lock the account out
+    /// for everyone, and the per-IP limit is gone. Basileia wiring checklist:
+    /// serve with `into_make_service_with_connect_info`, never plain `serve`.
     pub fn router(&self) -> Router {
         let router = Router::new()
             .route("/", get(index))
@@ -899,6 +1063,19 @@ impl Approver for Agora {
                 d
             } else {
                 if !s.approvals.values().any(|a| a.key == key) {
+                    // KR-08: pending approvals are bounded; the oldest one is
+                    // evicted to make room for the new one. The eviction is
+                    // logged: the Job waiting on the evicted approval stays
+                    // Paused until the approval is asked for again.
+                    while s.approvals.len() >= self.inner.max_approvals {
+                        let Some((_, evicted)) = s.approvals.pop_first() else {
+                            break;
+                        };
+                        eprintln!(
+                            "[agora] approval evicted: {} for {} ({}) — its Job stays paused",
+                            evicted.key.0, evicted.role, evicted.kind
+                        );
+                    }
                     let id = s.next_approval;
                     s.next_approval += 1;
                     s.approvals.insert(
@@ -956,9 +1133,15 @@ async fn submit_job(
     State(agora): State<Agora>,
     Json(request): Json<JobRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let id = agora
-        .submit(request)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let id = match agora.submit(request) {
+        Ok(id) => id,
+        // KR-08: a full Job table is backpressure, not a bad request. The
+        // prefix is shared with `submit` via `TOO_MANY_JOBS` (see there).
+        Err(e) if e.starts_with(TOO_MANY_JOBS) => {
+            return Err((StatusCode::TOO_MANY_REQUESTS, e));
+        }
+        Err(e) => return Err((StatusCode::BAD_REQUEST, e)),
+    };
     Ok((StatusCode::CREATED, Json(json!({"id": id}))))
 }
 
@@ -1082,4 +1265,5 @@ async fn usage(State(agora): State<Agora>) -> Json<Value> {
         .collect();
     Json(json!({"agents": agents, "jobs": jobs}))
 }
+
 
