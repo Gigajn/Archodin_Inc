@@ -38,6 +38,7 @@ fn agora_with(notifier: impl Notifier + 'static, window_ms: u64) -> Agora {
         .public_url("https://agora.test/")
         .notifier(Arc::new(notifier))
         .notify_window(Duration::from_millis(window_ms))
+        .insecure_no_auth()
         .build()
 }
 
@@ -190,6 +191,7 @@ async fn every_configured_notifier_gets_it_and_one_failing_does_not_block_the_ot
             "kudo@example.com",
         )))
         .notify_window(Duration::from_millis(10))
+        .insecure_no_auth()
         .build();
     agora.decide(&request("a", "Approve skill A")).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
