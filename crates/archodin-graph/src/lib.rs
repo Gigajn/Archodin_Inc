@@ -108,12 +108,35 @@ pub enum GraphError {
     /// The Job was stopped after `limit` Node executions with work still pending.
     #[error("step limit reached after {limit} steps")]
     StepLimitReached { limit: usize },
+    /// A durable Job's Checkpoint store failed; the Job could not save or
+    /// read a Checkpoint.
+    #[error("checkpoint storage failed: {0}")]
+    CheckpointFailed(#[from] StoreError),
     /// A conditional Edge's router returned a target that was not declared.
     #[error("conditional edge from `{node}` returned undeclared target `{target}`")]
     UnknownConditionalTarget { node: String, target: String },
     /// A Job stream ended without a closing event.
     #[error("the job stream ended without a closing event")]
     StreamEnded,
+}
+
+/// Why a storage operation failed.
+///
+/// Defined here (rather than in `archodin-store`) so the
+/// [`CheckpointStore`] trait can report it without a dependency cycle:
+/// `archodin-store` depends on this crate, so the trait cannot name a
+/// type from `archodin-store`. `archodin-store` re-exports this type.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StoreError {
+    /// The database failed or could not be reached.
+    #[error("storage backend failed: {0}")]
+    Backend(String),
+    /// Stored data could not be read back.
+    #[error("stored data is invalid: {0}")]
+    Invalid(String),
+    /// Stored Roles and Agents do not fit together.
+    #[error(transparent)]
+    Roster(#[from] RosterError),
 }
 
 /// What happened during a Job, in the order it happened.
@@ -146,6 +169,12 @@ pub enum JobEvent<S> {
     JobRejected { node: String, state: S },
     /// The Job stopped because it hit the Step limit; `state` is the State so far.
     StepLimitReached { limit: usize, state: S },
+    /// A durable Job stopped because its Checkpoint store failed; `error`
+    /// is why. This is a terminal event: the stream ends after it.
+    /// When the save after a Node fails, this replaces `NodeFinished`,
+    /// so consumers may see a `NodeStarted` without its matching
+    /// `NodeFinished`. The Job is over either way.
+    CheckpointFailed { error: StoreError },
     /// The Job failed with an error that could not be recovered (for example
     /// a conditional edge returned an undeclared target, or a resumed Job
     /// named a Node the Graph no longer has).
@@ -424,10 +453,13 @@ impl<S: Clone + Send + 'static> Graph<S> {
                     return Err(GraphError::StepLimitReached { limit })
                 }
                 JobEvent::JobFailed { error } => return Err(error),
+                JobEvent::CheckpointFailed { error } => {
+                    return Err(GraphError::CheckpointFailed(error))
+                }
                 // Every other event is progress, not an outcome: list them
                 // explicitly (no wildcard) so the compiler forces a future
-                // failure variant -- e.g. KR-04's `CheckpointFailed` -- to
-                // be handled here instead of silently ending the stream.
+                // failure variant to be handled here instead of silently
+                // ending the stream.
                 JobEvent::JobStarted
                 | JobEvent::NodeStarted { .. }
                 | JobEvent::NodeFinished { .. }
@@ -471,3 +503,4 @@ pub use upgrade::{
 };
 mod forja;
 pub use forja::{Forja, ForjaError, ForjaGitHub, ForjaPullRequest, ForjaWork};
+
