@@ -11,7 +11,7 @@ use futures::future::BoxFuture;
 use langchain_rust::tools::DuckDuckGoSearchResults;
 
 use crate::http_guard::{
-    read_capped, shared_client, text_capped, validate_endpoint, validate_url,
+    read_capped, shared_client, text_capped, validate_endpoint, validate_url, MAX_RESPONSE_BYTES,
 };
 use crate::{
     AgentError, AgentNode, Assignment, Skill, SkillLibrary, SkillSource, Strategos, StrategosError,
@@ -130,6 +130,7 @@ async fn get_text_checked(
     };
     checked.map_err(|e| RoninError::Fetch(format!("refused {url}: {e}")))?;
     let mut request = shared_client()
+        .map_err(|e| RoninError::Fetch(format!("could not build HTTP client: {e}")))?
         .get(url)
         .header("User-Agent", "archodin-ronin");
     if let Some(accept) = accept {
@@ -539,5 +540,49 @@ mod tests {
     fn fetch_refuses_credentials_in_the_url() {
         let err = block_on(get_text("https://user:pass@example.com/skill.md", None, None));
         assert!(matches!(err, Err(RoninError::Fetch(_))));
+    }
+
+    /// A response over the 2 MiB cap fails end-to-end, not just in the pure
+    /// `push_limited` helper: the body is refused with `TooLarge` instead of
+    /// being read unbounded through `get_text_checked` (KR-01, K-03).
+    #[test]
+    fn fetch_refuses_a_response_over_the_size_limit() {
+        let mut server = mockito::Server::new();
+        let big = "x".repeat(MAX_RESPONSE_BYTES + 1);
+        let mock = server
+            .mock("GET", "/big")
+            .with_status(200)
+            .with_body(big)
+            .create();
+        let url = format!("{}/big", server.url());
+        let result = block_on(get_text_checked(&url, None, None, true));
+        mock.assert();
+        match result {
+            Err(RoninError::Fetch(message)) => assert!(
+                message.contains("exceeded"),
+                "an over-limit body must fail as TooLarge, got {message:?}"
+            ),
+            other => panic!("an over-limit body must fail as TooLarge, got {other:?}"),
+        }
+    }
+
+    /// A redirect to the cloud metadata address is refused end-to-end: the
+    /// redirect policy never follows a hop off the starting origin to a
+    /// blocked host (KR-01, K-03).
+    #[test]
+    fn fetch_refuses_a_redirect_to_the_metadata_address() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/hop")
+            .with_status(302)
+            .with_header("location", "https://169.254.169.254/")
+            .create();
+        let url = format!("{}/hop", server.url());
+        let err = block_on(get_text_checked(&url, None, None, true));
+        mock.assert();
+        assert!(
+            matches!(err, Err(RoninError::Search(_))),
+            "a redirect to metadata must fail while sending, got {err:?}"
+        );
     }
 }

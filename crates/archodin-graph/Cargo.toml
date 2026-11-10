@@ -10,7 +10,7 @@ description = "Archodin Graph orchestration (placeholder)"
 langchain-rust = { path = "../.." }
 futures = "0.3.31"
 tokio = { version = "1", features = ["time", "rt", "process", "io-util", "sync"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "stream"] }
 thiserror = "2.0.17"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
@@ -25,3 +25,7 @@ base64 = "0.22"
 # Native Providers that langchain-rust gates behind its own features.
 ollama = ["langchain-rust/ollama"]
 bedrock = ["langchain-rust/bedrock"]
+
+[dev-dependencies]
+# Same version as crates/archodin: the unit tests below fake servers with it.
+mockito = "1.7"

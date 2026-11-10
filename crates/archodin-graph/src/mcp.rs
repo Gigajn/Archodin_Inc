@@ -143,7 +143,9 @@ impl McpClient {
                     McpError::Transport(format!("refused MCP server URL {url}: {e}"))
                 })?;
                 Conn::Http {
-                    client: shared_client(),
+                    client: shared_client().map_err(|e| {
+                        McpError::Transport(format!("could not build HTTP client: {e}"))
+                    })?,
                     url: url.clone(),
                     session: Mutex::new(None),
                 }
@@ -517,9 +519,12 @@ mod tests {
     }
 
     /// An operator-configured loopback server is allowed through validation:
-    /// nothing listens on the port, so connecting fails fast with a transport
-    /// error instead of a refusal. (The port is taken from a listener that is
-    /// closed first, so nothing can be listening on it.)
+    /// nothing listens on the port, so connecting fails fast instead of
+    /// being refused. (The port is taken from a listener that is closed
+    /// first, so nothing can be listening on it — but if another test's
+    /// server happens to reuse the port in that short window, the failure
+    /// is some other error, not a refusal; the assertion only pins down
+    /// "attempted, not refused".)
     #[test]
     fn http_server_on_loopback_is_attempted_not_blocked() {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
@@ -532,8 +537,14 @@ mod tests {
             format!("http://127.0.0.1:{port}/mcp"),
         )));
         assert!(
-            matches!(err, Err(McpError::Transport(_))),
-            "connecting to a closed loopback port must fail as a transport error, got {err:?}"
+            err.is_err(),
+            "connecting to a closed loopback port must fail"
         );
+        if let Err(McpError::Transport(message)) = &err {
+            assert!(
+                !message.contains("refused"),
+                "loopback must be attempted, not refused, got {message:?}"
+            );
+        }
     }
 }

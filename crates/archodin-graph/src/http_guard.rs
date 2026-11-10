@@ -175,7 +175,7 @@ fn check_host(url: &Url, raw: &str) -> Result<(), HttpGuardError> {
     let host = url
         .host_str()
         .ok_or_else(|| HttpGuardError::BlockedUrl(raw.to_string(), "URL has no host"))?;
-    let lower = host.to_ascii_lowercase();
+    let lower = host.trim_end_matches('.').to_ascii_lowercase();
     if lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") {
         return Err(HttpGuardError::BlockedUrl(
             raw.to_string(),
@@ -217,8 +217,14 @@ pub fn redirect_allowed(previous: &[Url], target: &Url) -> bool {
 
 /// The one client this crate fetches with: a 30 s total timeout and the
 /// redirect policy above. Cloning it is cheap (it is reference-counted).
-pub fn shared_client() -> reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+///
+/// Building the client returns an error instead of panicking: the settings
+/// are fixed constants, so in practice it always builds — but the failure is
+/// a value, not a panic, because every caller is on a job path (KR-06). A
+/// failed build is cached like a successful one: fixed settings either
+/// always build or never do.
+pub fn shared_client() -> Result<reqwest::Client, HttpGuardError> {
+    static CLIENT: OnceLock<Result<reqwest::Client, HttpGuardError>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
             let policy = redirect::Policy::custom(|attempt: redirect::Attempt| {
@@ -232,9 +238,7 @@ pub fn shared_client() -> reqwest::Client {
                 .timeout(REQUEST_TIMEOUT)
                 .redirect(policy)
                 .build()
-                // A client built from fixed settings (timeout + redirect
-                // policy) always builds; there is no user input to fail on.
-                .expect("the shared HTTP client is built from fixed settings")
+                .map_err(|e| HttpGuardError::Transport(e.to_string()))
         })
         .clone()
 }
@@ -253,7 +257,8 @@ pub fn push_limited(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), HttpGuardErr
 
 /// Reads a response body, stopping with [`HttpGuardError::TooLarge`] instead
 /// of growing without bound. Needs the `stream` feature of `reqwest`, which
-/// this workspace enables through the root crate.
+/// this crate declares in its own `Cargo.toml` (not borrowed from another
+/// crate's feature unification).
 pub async fn read_capped(response: reqwest::Response) -> Result<Vec<u8>, HttpGuardError> {
     let mut body = Vec::new();
     while let Some(chunk) = response
@@ -308,6 +313,9 @@ mod tests {
             "http://localhost/",
             "https://localhost/",
             "https://localhost:8080/search",
+            "https://localhost./",
+            "https://sub.localhost./",
+            "https://printer.local./",
             "https://sub.localhost/",
             "https://printer.local/",
             "http://127.0.0.1/",
@@ -487,6 +495,9 @@ mod tests {
 
     #[test]
     fn the_shared_client_builds() {
-        let _client = shared_client();
+        assert!(
+            shared_client().is_ok(),
+            "the shared client must build from fixed settings"
+        );
     }
 }

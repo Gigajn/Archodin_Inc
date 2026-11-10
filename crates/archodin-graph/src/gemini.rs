@@ -83,6 +83,7 @@ impl Gemini {
         validate_endpoint(url)
             .map_err(|e| LLMError::OtherError(format!("Gemini URL refused: {e}")))?;
         let response = shared_client()
+            .map_err(|e| LLMError::OtherError(format!("could not build HTTP client: {e}")))?
             .post(url)
             .header("x-goog-api-key", &self.api_key)
             .json(&self.payload(messages))
