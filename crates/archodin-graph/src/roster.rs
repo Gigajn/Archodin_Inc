@@ -15,6 +15,11 @@ use crate::locks::mutex;
 use crate::{AgentError, AgentNode, AgentTool, ChainEvent, GraphBuilder, ModelChain, Provider};
 
 /// A job description from which Agents are created.
+///
+/// Every Role carries a token Budget for its Agents. A Role built with
+/// [`Role::new`] gets [`DEFAULT_ROLE_BUDGET_TOKENS`]; call
+/// [`Role::budget_tokens`] for an explicit cap, or
+/// [`Role::without_budget_limit`] for the only way to opt out of the cap.
 #[derive(Clone)]
 pub struct Role {
     name: String,
@@ -25,8 +30,18 @@ pub struct Role {
     budget_tokens: Option<u64>,
 }
 
+/// The token Budget a Role's Agents get when the Role sets no explicit one:
+/// 100,000 tokens — roughly 66 large model steps (a step uses 60–1,500 tokens
+/// in the existing tests). Loose enough for normal Agents, still bounded, so
+/// `hire()` never creates an Agent that can spend without limit by accident.
+pub const DEFAULT_ROLE_BUDGET_TOKENS: u64 = 100_000;
+
 impl Role {
     /// A Role called `name` whose Agents follow `instructions`.
+    ///
+    /// The Role's Agents get a Budget of [`DEFAULT_ROLE_BUDGET_TOKENS`] tokens
+    /// unless the Role sets another one (see [`Role::budget_tokens`] and
+    /// [`Role::without_budget_limit`]).
     pub fn new(name: impl Into<String>, instructions: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -34,7 +49,7 @@ impl Role {
             tools: Vec::new(),
             skills: Vec::new(),
             model_chain: Vec::new(),
-            budget_tokens: None,
+            budget_tokens: Some(DEFAULT_ROLE_BUDGET_TOKENS),
         }
     }
 
@@ -62,6 +77,14 @@ impl Role {
         self
     }
 
+    /// Removes the Role's token Budget: Agents of this Role spend without a
+    /// token limit. This is the only way to get an unlimited Role — the
+    /// default is [`DEFAULT_ROLE_BUDGET_TOKENS`], never silent unlimited.
+    pub fn without_budget_limit(mut self) -> Self {
+        self.budget_tokens = None;
+        self
+    }
+
     /// The Role's name.
     pub fn name(&self) -> &str {
         &self.name
@@ -77,7 +100,9 @@ impl Role {
         &self.skills
     }
 
-    /// The Role's token Budget, if it has one.
+    /// The Role's token Budget, if it has one. `Some` by default (see
+    /// [`DEFAULT_ROLE_BUDGET_TOKENS`]); `None` only after
+    /// [`Role::without_budget_limit`].
     pub fn budget(&self) -> Option<u64> {
         self.budget_tokens
     }
@@ -335,6 +360,7 @@ impl<S: Send + 'static> GraphBuilder<S> {
 mod tests {
     use super::*;
 
+
     fn message(text: &str) -> Message {
         Message::new_human_message(text)
     }
@@ -361,5 +387,31 @@ mod tests {
         let mut empty: Vec<Message> = Vec::new();
         prune_history(&mut empty);
         assert!(empty.is_empty());
+
+    #[test]
+    fn hire_gets_capped_default() {
+        let roster = Roster::new();
+        roster.add_role(Role::new("Writer", "Be brief"));
+        let agent = roster.hire("Writer", "Nova").expect("hire");
+        assert_eq!(agent.budget_tokens(), Some(DEFAULT_ROLE_BUDGET_TOKENS));
+        assert_eq!(DEFAULT_ROLE_BUDGET_TOKENS, 100_000);
+    }
+
+    #[test]
+    fn hire_with_explicit_budget_keeps_it() {
+        let roster = Roster::new();
+        roster.add_role(Role::new("Writer", "Be brief").budget_tokens(500));
+        let agent = roster.hire("Writer", "Nova").unwrap();
+        assert_eq!(agent.budget_tokens(), Some(500));
+    }
+
+    #[test]
+    fn explicit_unlimited_requires_opt_in() {
+        let roster = Roster::new();
+        roster.add_role(Role::new("Writer", "Be brief").without_budget_limit());
+        let agent = roster.hire("Writer", "Nova").unwrap();
+        assert_eq!(agent.budget_tokens(), None);
+
     }
 }
+
