@@ -94,13 +94,15 @@ Learn more: https://skills.sh/vercel-labs/agent-skills/react-best-practices
 
 ### Step 6: Offer to Install
 
+Before installing any third-party skill, you MUST read the skill's `SKILL.md` and review its contents first. Do not install a skill you have not reviewed. Third-party skills may come from any source — official sources (for example `vercel-labs`, `anthropics`, `microsoft`) are suggested examples, not a restriction on where skills may come from.
+
 If the user wants to proceed, you can install the skill for them:
 
 ```bash
-npx skills add <owner/repo@skill> -g -y
+npx skills add <owner/repo@skill> -g
 ```
 
-The `-g` flag installs globally (user-level) and `-y` skips confirmation prompts.
+The `-g` flag installs globally (user-level). Do not use `-y`: explicit confirmation from the user is required before installing.
 
 ## Common Skill Categories
 
