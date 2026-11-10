@@ -15,6 +15,9 @@ pub use durable::{
     InMemoryCheckpointStore, JobOutcome, ScriptedApprover,
 };
 
+/// Lock helpers shared by the Archodin crates (see [`locks`]).
+pub mod locks;
+
 mod budget;
 
 pub use budget::{Budget, BudgetApprover, BudgetScope, Pricing, Usage, UsageMeter};
@@ -54,7 +57,7 @@ mod performance;
 pub use performance::{AgentFigures, CitedProposal, PerformanceLedger, PerformanceReport};
 
 mod roster;
-pub use roster::{branch_name, Agent, Role, Roster, RosterError};
+pub use roster::{branch_name, Agent, Role, Roster, RosterError, MAX_HISTORY_MESSAGES};
 
 mod vault;
 pub use vault::{Secret, Vault, VaultError};
@@ -109,6 +112,12 @@ pub enum GraphError {
     /// read a Checkpoint.
     #[error("checkpoint storage failed: {0}")]
     CheckpointFailed(#[from] StoreError),
+    /// A conditional Edge's router returned a target that was not declared.
+    #[error("conditional edge from `{node}` returned undeclared target `{target}`")]
+    UnknownConditionalTarget { node: String, target: String },
+    /// A Job stream ended without a closing event.
+    #[error("the job stream ended without a closing event")]
+    StreamEnded,
 }
 
 /// Why a storage operation failed.
@@ -166,6 +175,10 @@ pub enum JobEvent<S> {
     /// so consumers may see a `NodeStarted` without its matching
     /// `NodeFinished`. The Job is over either way.
     CheckpointFailed { error: StoreError },
+    /// The Job failed with an error that could not be recovered (for example
+    /// a conditional edge returned an undeclared target, or a resumed Job
+    /// named a Node the Graph no longer has).
+    JobFailed { error: GraphError },
 }
 
 /// Settings for one run, such as its Step limit.
@@ -231,8 +244,8 @@ impl<S: Send + 'static> GraphBuilder<S> {
     /// Adds a conditional Edge: after `from`, `router` reads the State and names the
     /// next Node. `targets` lists every name the router may return ([`END`] included).
     ///
-    /// # Panics
-    /// A run panics if `router` returns a name not listed in `targets`.
+    /// If `router` returns a name not listed in `targets`, the Job fails with
+    /// [`GraphError::UnknownConditionalTarget`] instead of panicking.
     pub fn conditional_edge<R>(self, from: &str, router: R, targets: &[&str]) -> Self
     where
         R: Fn(&S) -> &'static str + Send + Sync + 'static,
@@ -332,7 +345,8 @@ impl<S: Clone + Send + 'static> Graph<S> {
     }
 
     /// Runs a Job from `initial` with `options` and streams its events; the last one
-    /// is [`JobEvent::JobFinished`] or [`JobEvent::StepLimitReached`].
+    /// is [`JobEvent::JobFinished`], [`JobEvent::StepLimitReached`] or
+    /// [`JobEvent::JobFailed`].
     pub fn stream_with(&self, initial: S, options: RunOptions) -> BoxStream<'static, JobEvent<S>> {
         let inner = self.inner.clone();
         let limit = options.step_limit;
@@ -360,33 +374,54 @@ impl<S: Clone + Send + 'static> Graph<S> {
                         Phase::Exec(s, node),
                         steps + 1,
                     ),
-                    Phase::Exec(s, node) => {
-                        let updated = (inner.nodes[&node])(s).await;
-                        (
-                            Some(JobEvent::NodeFinished { node: node.clone() }),
-                            Phase::Leave(updated, node),
+                    Phase::Exec(s, node) => match inner.nodes.get(&node) {
+                        None => (
+                            Some(JobEvent::JobFailed {
+                                error: GraphError::UnknownEdgeNode(node.clone()),
+                            }),
+                            Phase::Done,
                             steps,
-                        )
-                    }
+                        ),
+                        Some(node_fn) => {
+                            let updated = node_fn(s).await;
+                            (
+                                Some(JobEvent::NodeFinished { node: node.clone() }),
+                                Phase::Leave(updated, node),
+                                steps,
+                            )
+                        }
+                    },
                     Phase::Leave(s, node) => {
                         let next = match inner.edges.get(&node) {
-                            None => END,
-                            Some(Edge::To(t)) => t.as_str(),
+                            None => Ok(END),
+                            Some(Edge::To(t)) => Ok(t.as_str()),
                             Some(Edge::Conditional { router, targets }) => {
                                 let chosen = router(&s);
-                                assert!(
-                                    targets.iter().any(|t| t == chosen),
-                                    "conditional edge from `{node}` returned undeclared target `{chosen}`"
-                                );
-                                chosen
+                                if targets.iter().any(|t| t == chosen) {
+                                    Ok(chosen)
+                                } else {
+                                    Err(GraphError::UnknownConditionalTarget {
+                                        node: node.clone(),
+                                        target: chosen.to_string(),
+                                    })
+                                }
                             }
                         };
-                        let phase = if next == END {
-                            Phase::Finish(s)
-                        } else {
-                            Phase::Enter(s, next.to_string())
-                        };
-                        (None, phase, steps)
+                        match next {
+                            Err(error) => (
+                                Some(JobEvent::JobFailed { error }),
+                                Phase::Done,
+                                steps,
+                            ),
+                            Ok(next) => {
+                                let phase = if next == END {
+                                    Phase::Finish(s)
+                                } else {
+                                    Phase::Enter(s, next.to_string())
+                                };
+                                (None, phase, steps)
+                            }
+                        }
                     }
                     Phase::Finish(s) => (
                         Some(JobEvent::JobFinished { state: s }),
@@ -417,10 +452,24 @@ impl<S: Clone + Send + 'static> Graph<S> {
                 JobEvent::StepLimitReached { limit, .. } => {
                     return Err(GraphError::StepLimitReached { limit })
                 }
-                _ => {}
+                JobEvent::JobFailed { error } => return Err(error),
+                JobEvent::CheckpointFailed { error } => {
+                    return Err(GraphError::CheckpointFailed(error))
+                }
+                // Every other event is progress, not an outcome: list them
+                // explicitly (no wildcard) so the compiler forces a future
+                // failure variant to be handled here instead of silently
+                // ending the stream.
+                JobEvent::JobStarted
+                | JobEvent::NodeStarted { .. }
+                | JobEvent::NodeFinished { .. }
+                | JobEvent::Conflict { .. }
+                | JobEvent::Decision { .. }
+                | JobEvent::JobPaused { .. }
+                | JobEvent::JobRejected { .. } => {}
             }
         }
-        unreachable!("a Job stream always ends with JobFinished or StepLimitReached")
+        Err(GraphError::StreamEnded)
     }
 }
 
@@ -454,3 +503,4 @@ pub use upgrade::{
 };
 mod forja;
 pub use forja::{Forja, ForjaError, ForjaGitHub, ForjaPullRequest, ForjaWork};
+
