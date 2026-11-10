@@ -20,7 +20,10 @@ pub mod locks;
 
 mod budget;
 
-pub use budget::{Budget, BudgetApprover, BudgetScope, Pricing, Usage, UsageMeter};
+pub use budget::{
+    Budget, BudgetApprover, BudgetError, BudgetScope, Pricing, Reservation, Usage, UsageMeter,
+    DEFAULT_WAIVER_TTL,
+};
 
 mod queue;
 
@@ -57,7 +60,7 @@ mod performance;
 pub use performance::{AgentFigures, CitedProposal, PerformanceLedger, PerformanceReport};
 
 mod roster;
-pub use roster::{branch_name, Agent, Role, Roster, RosterError, MAX_HISTORY_MESSAGES};
+pub use roster::{branch_name, Agent, Role, Roster, RosterError, MAX_HISTORY_MESSAGES, DEFAULT_ROLE_BUDGET_TOKENS};
 
 mod vault;
 pub use vault::{Secret, Vault, VaultError};
@@ -503,4 +506,5 @@ pub use upgrade::{
 };
 mod forja;
 pub use forja::{Forja, ForjaError, ForjaGitHub, ForjaPullRequest, ForjaWork};
+
 
