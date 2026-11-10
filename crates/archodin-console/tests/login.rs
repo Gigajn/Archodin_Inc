@@ -24,7 +24,9 @@ fn auth() -> Auth {
 
 /// Same login, but with a short lockout so the lockout tests run in seconds.
 fn auth_with_lockout() -> Auth {
-    auth().failed_login_limit(5).lockout_base(Duration::from_secs(2))
+    auth()
+        .failed_login_limit(5)
+        .lockout_base(Duration::from_secs(2))
 }
 
 fn app_with(auth: Auth) -> Router {
@@ -90,12 +92,7 @@ async fn login(app: &Router, user: &str, password: &str) -> Reply {
     login_ip(app, user, password, None).await
 }
 
-async fn login_ip(
-    app: &Router,
-    user: &str,
-    password: &str,
-    ip: Option<SocketAddr>,
-) -> Reply {
+async fn login_ip(app: &Router, user: &str, password: &str, ip: Option<SocketAddr>) -> Reply {
     send_with_ip(
         app,
         "POST",
@@ -256,6 +253,33 @@ async fn five_failed_logins_lock_out_the_sixth_even_with_the_right_password() {
     // Once the lockout lapses, the right password works again.
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(login(&app, "kudo", PASSWORD).await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_successful_login_clears_the_failed_count() {
+    let app = app_with(auth_with_lockout());
+    // Four failures, then a success: the count is cleared.
+    for _ in 0..4 {
+        assert_eq!(
+            login(&app, "kudo", "wrong").await.status,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(login(&app, "kudo", PASSWORD).await.status, StatusCode::OK);
+    // Four more failures after the success must still be plain refusals:
+    // had the count survived, the first of these would already lock out.
+    for n in 1..=4 {
+        let r = login(&app, "kudo", "wrong").await;
+        assert_eq!(
+            r.status,
+            StatusCode::UNAUTHORIZED,
+            "attempt {n} after success"
+        );
+    }
+    assert_eq!(
+        login(&app, "kudo", "wrong").await.status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
 }
 
 #[tokio::test]

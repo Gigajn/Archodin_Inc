@@ -396,6 +396,10 @@ impl AgoraBuilder {
     /// default: [`AgoraBuilder::build`] panics without either this or
     /// [`AgoraBuilder::insecure_no_auth`], so an open router is always a
     /// deliberate choice, never a forgotten call.
+    ///
+    /// The per-IP part of the login lockout only works when the router is
+    /// served with `into_make_service_with_connect_info` — see
+    /// [`Agora::router`].
     pub fn auth(mut self, auth: Auth) -> Self {
         self.auth = Some(auth);
         self
@@ -406,7 +410,8 @@ impl AgoraBuilder {
     ///
     /// Only for tests and trusted local use (for example a console bound to
     /// localhost that no other machine can reach). Never for a console
-    /// reachable from a network.
+    /// reachable from a network. Has no effect when [`.auth()`](Self::auth)
+    /// is also set: the login wins and the router stays protected.
     pub fn insecure_no_auth(mut self) -> Self {
         self.insecure_no_auth = true;
         self
@@ -415,13 +420,23 @@ impl AgoraBuilder {
     /// The most Jobs kept at once (default 1000). When the table is full, the
     /// oldest finished Job is evicted to make room; if every slot is busy,
     /// [`Agora::submit`] refuses the new Job instead of growing without bound.
+    ///
+    /// Paused Jobs count toward the cap and are never evicted — only finished,
+    /// rejected, failed or cancelled Jobs are. A table full of Paused Jobs
+    /// therefore refuses new Jobs until the operator cancels one; that is
+    /// fail-closed by design, not a leak.
     pub fn max_jobs(mut self, n: usize) -> Self {
         self.max_jobs = n.max(1);
         self
     }
 
     /// The most pending approvals kept at once (default 1000). When the list
-    /// is full, the oldest pending approval is evicted to make room.
+    /// is full, the oldest pending approval is evicted to make room; the
+    /// eviction is logged to stderr.
+    ///
+    /// An evicted approval simply disappears: the Job waiting on it stays
+    /// Paused — it is never resumed by the eviction — until the approval is
+    /// asked for again or the operator cancels the Job.
     pub fn max_approvals(mut self, n: usize) -> Self {
         self.max_approvals = n.max(1);
         self
@@ -505,6 +520,13 @@ const DEFAULT_MAX_JOBS: usize = 1000;
 const DEFAULT_MAX_APPROVALS: usize = 1000;
 const DEFAULT_MAX_EVENTS_PER_JOB: usize = 1000;
 
+/// Prefix of the error [`Agora::submit`] returns when the Job table is full
+/// and every slot is busy. The HTTP handler ([`submit_job`]) maps errors
+/// starting with this prefix to 429; keep the two sites on this constant so
+/// rewording the message cannot silently turn the 429 into a 400. A typed
+/// error is a follow-up, not part of this change.
+const TOO_MANY_JOBS: &str = "too many jobs";
+
 /// Drops a Job and every approval and remembered decision that names it, so
 /// evicting a Job never leaves dangling keys behind.
 fn evict_job(s: &mut State_, id: u64) {
@@ -516,6 +538,10 @@ fn evict_job(s: &mut State_, id: u64) {
 
 /// Drops remembered decisions for Jobs that no longer exist, and caps the map
 /// so the full prompt strings it keys on cannot grow without bound.
+///
+/// The cap drops entries in arbitrary `HashMap` order, by design: dropping
+/// any entry is safe — the next `decide` for that question simply asks again
+/// instead of reusing the remembered answer.
 fn prune_decided(s: &mut State_, max: usize) {
     s.decided.retain(|k, _| match job_number(&k.0) {
         None => true,
@@ -610,7 +636,7 @@ impl Agora {
                     .find(|(_, j)| j.status.is_terminal())
                     .map(|(id, _)| *id)
                 else {
-                    return Err("too many jobs: all job slots are busy".into());
+                    return Err(format!("{TOO_MANY_JOBS}: all job slots are busy"));
                 };
                 evict_job(&mut s, oldest);
             }
@@ -889,6 +915,16 @@ impl Agora {
     }
 
     /// The axum router serving the page and the API.
+    ///
+    /// # Client identity for the login limit
+    ///
+    /// The per-IP part of the login lockout (see [`Auth`]) only sees the real
+    /// client IP when the application serves this router with
+    /// `into_make_service_with_connect_info::<SocketAddr>()`. Served any other
+    /// way, every client looks like `"unknown"` and the limit applies per
+    /// username only — five bad guesses from anyone then lock the account out
+    /// for everyone, and the per-IP limit is gone. Basileia wiring checklist:
+    /// serve with `into_make_service_with_connect_info`, never plain `serve`.
     pub fn router(&self) -> Router {
         let router = Router::new()
             .route("/", get(index))
@@ -1011,11 +1047,17 @@ impl Approver for Agora {
             } else {
                 if !s.approvals.values().any(|a| a.key == key) {
                     // KR-08: pending approvals are bounded; the oldest one is
-                    // evicted to make room for the new one.
+                    // evicted to make room for the new one. The eviction is
+                    // logged: the Job waiting on the evicted approval stays
+                    // Paused until the approval is asked for again.
                     while s.approvals.len() >= self.inner.max_approvals {
-                        if s.approvals.pop_first().is_none() {
+                        let Some((_, evicted)) = s.approvals.pop_first() else {
                             break;
-                        }
+                        };
+                        eprintln!(
+                            "[agora] approval evicted: {} for {} ({}) — its Job stays paused",
+                            evicted.key.0, evicted.role, evicted.kind
+                        );
                     }
                     let id = s.next_approval;
                     s.next_approval += 1;
@@ -1076,8 +1118,9 @@ async fn submit_job(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let id = match agora.submit(request) {
         Ok(id) => id,
-        // KR-08: a full Job table is backpressure, not a bad request.
-        Err(e) if e.starts_with("too many jobs") => {
+        // KR-08: a full Job table is backpressure, not a bad request. The
+        // prefix is shared with `submit` via `TOO_MANY_JOBS` (see there).
+        Err(e) if e.starts_with(TOO_MANY_JOBS) => {
             return Err((StatusCode::TOO_MANY_REQUESTS, e));
         }
         Err(e) => return Err((StatusCode::BAD_REQUEST, e)),

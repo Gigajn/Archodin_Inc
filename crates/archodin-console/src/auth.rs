@@ -159,9 +159,19 @@ impl Auth {
     }
 
     /// Lockout after the first failures; it doubles on every further failure
-    /// up to the max lockout (default [`DEFAULT_LOCKOUT_BASE`]).
+    /// up to the max lockout (default [`DEFAULT_LOCKOUT_BASE`]). A base longer
+    /// than the max lockout is silently clamped to it; see
+    /// [`Auth::max_lockout`].
     pub fn lockout_base(mut self, base: Duration) -> Self {
         self.lockout_base = base;
+        self
+    }
+
+    /// The longest any lockout lasts (default [`DEFAULT_MAX_LOCKOUT`]).
+    /// A [`lockout_base`](Self::lockout_base) longer than this is silently
+    /// clamped to it. Clamped to at least one second.
+    pub fn max_lockout(mut self, max: Duration) -> Self {
+        self.max_lockout = max.max(Duration::from_secs(1));
         self
     }
 
@@ -215,7 +225,8 @@ impl Auth {
             let wait = self.lockout_duration(entry.failures);
             entry.locked_until = Some(now + wait);
             eprintln!(
-                "[agora] login locked out: user `{}` from {} after {} failed attempts; retry in {}s",
+                "[agora] login locked out: user `{}` from {} after {} failed attempts; "
+                "retry in {}s",
                 key.1,
                 key.0,
                 entry.failures,
@@ -400,4 +411,36 @@ async fn logout(State(auth): State<Auth>, headers: HeaderMap) -> Response {
         .headers_mut()
         .insert(header::SET_COOKIE, auth.cookie("", 0));
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn auth_with(base: Duration, max: Duration) -> Auth {
+        let vault = Vault::new([0; 32]);
+        vault.put("u", "kudo");
+        vault.put("h", &hash_password("pw"));
+        Auth::from_vault(&vault, "u", "h")
+            .unwrap()
+            .lockout_base(base)
+            .max_lockout(max)
+    }
+
+    #[test]
+    fn lockout_doubles_each_failure_and_stops_at_the_cap() {
+        let auth = auth_with(Duration::from_secs(2), Duration::from_secs(15 * 60));
+        // The 5th failure (the limit) trips the base lockout; each failure
+        // after that doubles it until the cap binds.
+        assert_eq!(auth.lockout_duration(5), Duration::from_secs(2));
+        assert_eq!(auth.lockout_duration(6), Duration::from_secs(4));
+        assert_eq!(auth.lockout_duration(7), Duration::from_secs(8));
+        assert_eq!(auth.lockout_duration(100), Duration::from_secs(15 * 60));
+    }
+
+    #[test]
+    fn lockout_base_above_the_max_is_clamped() {
+        let auth = auth_with(Duration::from_secs(3600), Duration::from_secs(60));
+        assert_eq!(auth.lockout_duration(5), Duration::from_secs(60));
+    }
 }

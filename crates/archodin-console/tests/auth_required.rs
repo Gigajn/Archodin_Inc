@@ -54,5 +54,7 @@ async fn auth_still_protects_every_route_when_set() {
         .router();
     assert_eq!(get(&app, "/api/jobs").await, StatusCode::UNAUTHORIZED);
     assert_eq!(get(&app, "/api/usage").await, StatusCode::UNAUTHORIZED);
+    // Unknown API paths are protected too, not just the named routes.
+    assert_eq!(get(&app, "/api/nope").await, StatusCode::UNAUTHORIZED);
     assert_eq!(get(&app, "/").await, StatusCode::SEE_OTHER);
 }
