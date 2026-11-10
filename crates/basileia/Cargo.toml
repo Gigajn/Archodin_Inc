@@ -1,0 +1,24 @@
+[package]
+name = "basileia"
+version = "0.1.0"
+edition = "2021"
+# PROPRIETARY — this is the Basileia application, not the MIT library.
+# See LICENSE-BASILEIA in this crate and ADR 0007. Do NOT change this to MIT:
+# the two licenses must never mix silently.
+license = "LicenseRef-Proprietary"
+publish = false
+description = "Basileia: the proprietary application that assembles Agora, the Graph, the Roster and the SqlStore into the running company (all rights reserved; see LICENSE-BASILEIA)"
+
+[dependencies]
+archodin-console = { path = "../archodin-console" }
+archodin-graph = { path = "../archodin-graph" }
+archodin-store = { path = "../archodin-store" }
+axum = "0.8"
+futures = "0.3.31"
+# One random 32-byte Vault key per process (see `src/assembly.rs`): no other
+# randomness dependency exists in the workspace, so `getrandom` is added
+# directly instead of borrowing a transitive re-export.
+getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }

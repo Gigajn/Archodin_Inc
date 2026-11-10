@@ -1,0 +1,16 @@
+Basileia — Proprietary License Notice
+
+Copyright (c) 2026 Archodin. All rights reserved.
+
+This crate (`basileia`) is the proprietary application built on the
+MIT-licensed Archodin library (see `docs/adr/0007-archodin-mit-library-
+basileia-proprietary-app.md`). It is NOT open source: no permission is
+granted to use, copy, modify, merge, publish, distribute, sublicense,
+or sell copies of this software, except as expressly agreed in writing
+by the copyright holder.
+
+The MIT-licensed Archodin library crates this application depends on
+(`archodin`, `archodin-graph`, `archodin-store`, `archodin-console`)
+remain under their own MIT license (see `LICENSE-ARCHODIN` at the repo
+root). This notice applies only to the Basileia application crate
+itself, so the two licenses never mix silently.
