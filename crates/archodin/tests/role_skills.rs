@@ -149,3 +149,75 @@ async fn scripts_stay_disabled_until_approved_separately() {
     approve(&lib, 1).await;
     assert!(lib.authorized_script("Engineer", "tidy", "fmt.sh").is_err());
 }
+
+#[test]
+fn skill_names_must_be_short_lowercase_and_hyphenated() {
+    let md = |name: &str| format!("---\nname: {name}\ndescription: d\n---\nbody\n");
+    for bad in [
+        "Bad_Name!",
+        "has space",
+        "UPPER",
+        "9lives",
+        "-leading",
+        "trailing-",
+    ] {
+        assert!(
+            matches!(
+                Skill::from_markdown(&md(bad)),
+                Err(SkillError::InvalidSkill(_))
+            ),
+            "{bad} must be rejected"
+        );
+    }
+    assert!(matches!(
+        Skill::from_markdown(&md(&"a".repeat(65))),
+        Err(SkillError::InvalidSkill(_))
+    ));
+    assert!(Skill::from_markdown(&md("ok-name-1")).is_ok());
+    assert!(Skill::from_markdown(&md(&"a".repeat(64))).is_ok());
+    // A `uses` entry must be a valid skill name too.
+    assert!(matches!(
+        Skill::from_markdown("---\nname: tidy\ndescription: d\nuses: Bad Name\n---\nbody\n"),
+        Err(SkillError::InvalidSkill(_))
+    ));
+}
+
+#[test]
+fn skill_text_has_length_limits() {
+    let md = format!(
+        "---\nname: tidy\ndescription: {}\n---\nbody\n",
+        "d".repeat(513)
+    );
+    assert!(matches!(
+        Skill::from_markdown(&md),
+        Err(SkillError::InvalidSkill(_))
+    ));
+    // The parsed body keeps one trailing newline, so 65_535 `b`s are exactly at
+    // the 65_536 limit and 70_000 are over it.
+    let md = format!(
+        "---\nname: tidy\ndescription: d\n---\n{}\n",
+        "b".repeat(70_000)
+    );
+    assert!(matches!(
+        Skill::from_markdown(&md),
+        Err(SkillError::InvalidSkill(_))
+    ));
+    let md = format!(
+        "---\nname: tidy\ndescription: {}\n---\n{}\n",
+        "d".repeat(512),
+        "b".repeat(65_535)
+    );
+    assert!(Skill::from_markdown(&md).is_ok());
+}
+
+#[test]
+fn an_uninspected_proposal_is_recorded_as_unverified() {
+    // A Skill queued without Vigil's inspection must not be recorded as if it
+    // had been checked: no summary, and flagged unverified.
+    let (_, lib) = setup();
+    lib.propose("Engineer", Skill::from_markdown(TIDY_MD).unwrap());
+    let pending = lib.pending();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].unverified);
+    assert_eq!(pending[0].summary, None);
+}
