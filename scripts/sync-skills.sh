@@ -14,6 +14,8 @@
 #   - symlink yang targetnya rusak/hilang (dangling);
 #   - entri di `.agents/skills/` tanpa padanan di `.claude/skills/`,
 #     atau sebaliknya (entri yatim di cermin).
+# File biasa di `.agents/skills/` (mis. README.md) bukan skill dan tidak
+# dicerminkan — hanya subdirektori yang dianggap skill.
 # Kasus-kasus itu menandakan cermin menyimpang dan harus diperbaiki
 # manual, bukan ditimpa otomatis.
 #
@@ -64,9 +66,12 @@ errors=0
 fixed=0
 
 # Daftar kanonik (glob sudah terurut) + set untuk pengecekan balik.
+# Hanya direktori yang dianggap skill; file dokumentasi di pohon kanonik
+# (mis. README.md) TIDAK dicerminkan ke `.claude/skills/`.
 declare -a canonical_names=()
 declare -A canonical=()
 for entry in "$AGENTS_DIR"/*; do
+  [[ -d "$entry" && ! -L "$entry" ]] || continue
   name="$(basename "$entry")"
   canonical_names+=("$name")
   canonical["$name"]=1
