@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -18,6 +18,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use crate::http_guard::{read_capped, shared_client, text_capped, validate_endpoint};
+use crate::locks::mutex;
 use crate::{AgentTool, ApprovalDecision, ApprovalRequest, Approver};
 
 const PROTOCOL_VERSION: &str = "2025-03-26";
@@ -308,7 +309,7 @@ impl McpClient {
             .post(url)
             .header("Accept", "application/json, text/event-stream")
             .json(message);
-        if let Some(id) = lock(session).clone() {
+        if let Some(id) = mutex(session).clone() {
             request = request.header("Mcp-Session-Id", id);
         }
         let response = request
@@ -326,7 +327,7 @@ impl McpClient {
             .get("mcp-session-id")
             .and_then(|v| v.to_str().ok())
         {
-            *lock(session) = Some(id.to_string());
+            *mutex(session) = Some(id.to_string());
         }
         // The reply is read capped at 2 MiB instead of unbounded (KR-01).
         let body = read_capped(response)
@@ -388,10 +389,6 @@ fn render_content(result: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// An MCP server waiting for a person to approve it for a Role.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingMcpServer {
@@ -423,7 +420,7 @@ impl McpLibrary {
 
     /// Holds `server` for `role` until a person approves it.
     pub fn propose(&self, role: &str, server: McpServer) {
-        lock(&self.inner).pending.push(PendingMcpServer {
+        mutex(&self.inner).pending.push(PendingMcpServer {
             role: role.to_string(),
             server,
         });
@@ -431,7 +428,7 @@ impl McpLibrary {
 
     /// The servers waiting for approval, oldest first.
     pub fn pending(&self) -> Vec<PendingMcpServer> {
-        lock(&self.inner).pending.clone()
+        mutex(&self.inner).pending.clone()
     }
 
     /// Asks `approver` about every pending server. Approved ones are given to
@@ -452,7 +449,7 @@ impl McpLibrary {
             if decision == ApprovalDecision::Pending {
                 continue;
             }
-            let mut inner = lock(&self.inner);
+            let mut inner = mutex(&self.inner);
             if let Some(i) = inner.pending.iter().position(|p| *p == item) {
                 inner.pending.remove(i);
             }
@@ -468,7 +465,7 @@ impl McpLibrary {
 
     /// The approved servers of a Role.
     pub fn servers_for_role(&self, role: &str) -> Vec<McpServer> {
-        lock(&self.inner)
+        mutex(&self.inner)
             .approved
             .get(role)
             .cloned()
@@ -548,3 +545,4 @@ mod tests {
         }
     }
 }
+
