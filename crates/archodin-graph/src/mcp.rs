@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
+use crate::http_guard::{read_capped, shared_client, text_capped, validate_endpoint};
 use crate::{AgentTool, ApprovalDecision, ApprovalRequest, Approver};
 
 const PROTOCOL_VERSION: &str = "2025-03-26";
@@ -133,11 +134,20 @@ impl McpClient {
                     stdout: BufReader::new(stdout).lines(),
                 })))
             }
-            Transport::Http { url } => Conn::Http {
-                client: reqwest::Client::new(),
-                url: url.clone(),
-                session: Mutex::new(None),
-            },
+            Transport::Http { url } => {
+                // The server URL is operator configuration (and an approved
+                // server on top of that), so it goes through the operator
+                // check — but it is still validated before anything connects,
+                // and every request then uses the shared hardened client.
+                validate_endpoint(url).map_err(|e| {
+                    McpError::Transport(format!("refused MCP server URL {url}: {e}"))
+                })?;
+                Conn::Http {
+                    client: shared_client(),
+                    url: url.clone(),
+                    session: Mutex::new(None),
+                }
+            }
         };
         let client = Self {
             inner: Arc::new(Inner {
@@ -316,10 +326,11 @@ impl McpClient {
         {
             *lock(session) = Some(id.to_string());
         }
-        response
-            .text()
+        // The reply is read capped at 2 MiB instead of unbounded (KR-01).
+        let body = read_capped(response)
             .await
-            .map_err(|e| McpError::Transport(e.to_string()))
+            .map_err(|e| McpError::Transport(e.to_string()))?;
+        Ok(text_capped(body))
     }
 }
 
@@ -469,5 +480,60 @@ impl McpLibrary {
             tools.extend(McpClient::connect(&server).await?.tools().await?);
         }
         Ok(tools)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            // A current-thread runtime with no special settings always builds.
+            .expect("a test runtime always builds")
+            .block_on(future)
+    }
+
+    /// A malformed server URL fails in `connect` before anything connects —
+    /// so these tests need no network.
+    #[test]
+    fn http_server_with_a_bad_url_is_refused_before_connecting() {
+        for url in [
+            "file:///etc/passwd",
+            "ftp://example.com/mcp",
+            "https://user:pass@example.com/mcp",
+            "https://",
+            "not a url",
+        ] {
+            let err = block_on(McpClient::connect(&McpServer::http("x", url)));
+            assert!(
+                matches!(err, Err(McpError::Transport(_))),
+                "{url} must be refused with a Transport error, got {err:?}"
+            );
+        }
+    }
+
+    /// An operator-configured loopback server is allowed through validation:
+    /// nothing listens on the port, so connecting fails fast with a transport
+    /// error instead of a refusal. (The port is taken from a listener that is
+    /// closed first, so nothing can be listening on it.)
+    #[test]
+    fn http_server_on_loopback_is_attempted_not_blocked() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("binding a loopback listener always works")
+            .local_addr()
+            .expect("a bound listener always has an address")
+            .port();
+        let err = block_on(McpClient::connect(&McpServer::http(
+            "x",
+            format!("http://127.0.0.1:{port}/mcp"),
+        )));
+        assert!(
+            matches!(err, Err(McpError::Transport(_))),
+            "connecting to a closed loopback port must fail as a transport error, got {err:?}"
+        );
     }
 }

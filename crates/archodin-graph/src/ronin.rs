@@ -10,6 +10,9 @@
 use futures::future::BoxFuture;
 use langchain_rust::tools::DuckDuckGoSearchResults;
 
+use crate::http_guard::{
+    read_capped, shared_client, text_capped, validate_endpoint, validate_url,
+};
 use crate::{
     AgentError, AgentNode, Assignment, Skill, SkillLibrary, SkillSource, Strategos, StrategosError,
     Verdict, Vigil,
@@ -96,12 +99,37 @@ fn encode(text: &str) -> String {
     out
 }
 
+/// Fetches `url` with the hardened client (KR-01): the URL must pass the
+/// strict check (public `https` only), the request times out after 30 s, at
+/// most 5 redirects are followed (only to allowed targets), and at most
+/// 2 MiB of the response is read. A refused URL fails here, before any
+/// request is sent.
 async fn get_text(
     url: &str,
     accept: Option<&str>,
     token: Option<&str>,
 ) -> Result<String, RoninError> {
-    let mut request = reqwest::Client::new()
+    get_text_checked(url, accept, token, false).await
+}
+
+/// Like [`get_text`], but `operator_base` marks a URL built from an endpoint
+/// the operator configured (a self-hosted SearXNG, the GitHub API): those may
+/// be plain `http` on a private host, because the operator chose them. Hit
+/// URLs from search results are never operator URLs and always go through
+/// the strict check in [`get_text`].
+async fn get_text_checked(
+    url: &str,
+    accept: Option<&str>,
+    token: Option<&str>,
+    operator_base: bool,
+) -> Result<String, RoninError> {
+    let checked = if operator_base {
+        validate_endpoint(url)
+    } else {
+        validate_url(url)
+    };
+    checked.map_err(|e| RoninError::Fetch(format!("refused {url}: {e}")))?;
+    let mut request = shared_client()
         .get(url)
         .header("User-Agent", "archodin-ronin");
     if let Some(accept) = accept {
@@ -117,10 +145,10 @@ async fn get_text(
     if !response.status().is_success() {
         return Err(RoninError::Fetch(format!("{url} ({})", response.status())));
     }
-    response
-        .text()
+    let body = read_capped(response)
         .await
-        .map_err(|e| RoninError::Fetch(format!("{url} ({e})")))
+        .map_err(|e| RoninError::Fetch(format!("{url}: {e}")))?;
+    Ok(text_capped(body))
 }
 
 fn str_field(value: &serde_json::Value, key: &str) -> String {
@@ -149,7 +177,10 @@ impl SearchEngine for SearxngSearch {
     fn search<'a>(&'a self, query: &'a str) -> BoxFuture<'a, Result<Vec<SearchHit>, RoninError>> {
         Box::pin(async move {
             let url = format!("{}/search?q={}&format=json", self.base_url, encode(query));
-            let body = get_text(&url, Some("application/json"), None).await?;
+            // The SearXNG base URL is operator configuration, so this request
+            // goes through the operator check; the hits it returns are still
+            // fetched through the strict check in `get_text`.
+            let body = get_text_checked(&url, Some("application/json"), None, true).await?;
             let json: serde_json::Value =
                 serde_json::from_str(&body).map_err(|e| RoninError::Search(e.to_string()))?;
             Ok(json["results"]
@@ -259,10 +290,14 @@ impl GitHubSearch {
             self.api_url,
             encode(query)
         );
-        let body = get_text(
+        // The API base URL is operator configuration, so this request goes
+        // through the operator check; the hit URLs it returns are still
+        // fetched through the strict check in `GitHubSearch::fetch`.
+        let body = get_text_checked(
             &url,
             Some("application/vnd.github+json"),
             self.token.as_deref(),
+            true,
         )
         .await?;
         let json: serde_json::Value =
@@ -460,5 +495,49 @@ impl Ronin {
             }
         }
         Ok(None)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            // A current-thread runtime with no special settings always builds.
+            .expect("a test runtime always builds")
+            .block_on(future)
+    }
+
+    /// Every URL in this table must fail in validation, before any request
+    /// is sent — so these tests need no network and never touch the target.
+    #[test]
+    fn fetch_refuses_ssrf_targets_before_any_request() {
+        for url in [
+            "http://169.254.169.254/latest/meta-data/",
+            "https://169.254.169.254/",
+            "http://localhost/",
+            "https://localhost/",
+            "http://10.0.0.1/",
+            "https://192.168.1.1/",
+            "https://127.0.0.1/",
+            "https://[::1]/",
+            "http://example.com/skill.md",
+        ] {
+            let err = block_on(get_text(url, None, None));
+            assert!(
+                matches!(err, Err(RoninError::Fetch(_))),
+                "{url} must be refused with a Fetch error, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_refuses_credentials_in_the_url() {
+        let err = block_on(get_text("https://user:pass@example.com/skill.md", None, None));
+        assert!(matches!(err, Err(RoninError::Fetch(_))));
     }
 }
