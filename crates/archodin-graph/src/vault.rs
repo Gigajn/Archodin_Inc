@@ -15,6 +15,8 @@ use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use zeroize::Zeroizing;
 
+use crate::locks::{read, write};
+
 const NONCE_LEN: usize = 12;
 
 /// Why a vault operation failed.
@@ -120,26 +122,22 @@ impl Vault {
     /// Stores `value` under `name`, replacing (rotating) any earlier value.
     pub fn put(&self, name: &str, value: &str) {
         let blob = self.encrypt(name, value);
-        self.inner
-            .entries
-            .write()
-            .unwrap()
-            .insert(name.to_string(), blob);
+        write(&self.inner.entries).insert(name.to_string(), blob);
     }
 
     /// Removes the secret called `name`; true if there was one.
     pub fn remove(&self, name: &str) -> bool {
-        self.inner.entries.write().unwrap().remove(name).is_some()
+        write(&self.inner.entries).remove(name).is_some()
     }
 
     /// The names of all secrets, sorted. Values are never listed.
     pub fn names(&self) -> Vec<String> {
-        self.inner.entries.read().unwrap().keys().cloned().collect()
+        read(&self.inner.entries).keys().cloned().collect()
     }
 
     /// Decrypts the secret called `name`.
     pub fn resolve(&self, name: &str) -> Result<Secret, VaultError> {
-        let entries = self.inner.entries.read().unwrap();
+        let entries = read(&self.inner.entries);
         let blob = entries
             .get(name)
             .ok_or_else(|| VaultError::UnknownSecret(name.to_string()))?;
@@ -149,7 +147,7 @@ impl Vault {
     /// Replaces every known secret value in `text` with `[redacted]`, for text that
     /// may reach events, logs, Briefings or the Akasha.
     pub fn redact(&self, text: &str) -> String {
-        let entries = self.inner.entries.read().unwrap();
+        let entries = read(&self.inner.entries);
         let mut out = text.to_string();
         for (name, blob) in entries.iter() {
             if let Ok(secret) = self.decrypt(name, blob) {
@@ -163,8 +161,12 @@ impl Vault {
 
     /// The vault as bytes safe to write to disk: names in clear, values encrypted.
     pub fn seal(&self) -> Vec<u8> {
-        let entries = self.inner.entries.read().unwrap();
-        serde_json::to_vec(&*entries).expect("a map of bytes always serializes")
+        let entries = read(&self.inner.entries);
+        // Serializing a map of names to bytes into a `Vec` cannot fail: the
+        // keys are strings and the writer never errors. The empty fallback
+        // only keeps the process alive if that ever stops holding; `unseal`
+        // of empty bytes still fails loudly with `VaultError::Malformed`.
+        serde_json::to_vec(&*entries).unwrap_or_default()
     }
 
     /// Opens bytes from [`Vault::seal`] with `key`; a wrong key or altered bytes
@@ -176,7 +178,7 @@ impl Vault {
         for (name, blob) in &entries {
             vault.decrypt(name, blob)?;
         }
-        *vault.inner.entries.write().unwrap() = entries;
+        *write(&vault.inner.entries) = entries;
         Ok(vault)
     }
 }

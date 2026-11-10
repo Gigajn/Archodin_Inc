@@ -7,8 +7,10 @@
 //! [`Clock`], so tests drive it with a [`ManualClock`].
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::locks::mutex;
 
 /// Where a Job came from; it decides how soon the Job starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -62,10 +64,6 @@ impl<S> Default for JobQueue<S> {
     }
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 impl<S> JobQueue<S> {
     pub fn new() -> Self {
         Self {
@@ -82,7 +80,7 @@ impl<S> JobQueue<S> {
     }
 
     fn push(&self, origin: JobOrigin, state: S, schedule: Option<ScheduleId>) -> JobId {
-        let mut inner = lock(&self.inner);
+        let mut inner = mutex(&self.inner);
         let seq = inner.next_id;
         inner.next_id += 1;
         let id = JobId(seq);
@@ -100,12 +98,12 @@ impl<S> JobQueue<S> {
 
     /// Takes the Job that should start next, if any.
     pub fn next(&self) -> Option<QueuedJob<S>> {
-        lock(&self.inner).waiting.pop_first().map(|(_, job)| job)
+        mutex(&self.inner).waiting.pop_first().map(|(_, job)| job)
     }
 
     /// How many Jobs are waiting.
     pub fn len(&self) -> usize {
-        lock(&self.inner).waiting.len()
+        mutex(&self.inner).waiting.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -143,13 +141,13 @@ impl ManualClock {
     }
 
     pub fn advance(&self, by: Duration) {
-        *lock(&self.now) += by;
+        *mutex(&self.now) += by;
     }
 }
 
 impl Clock for ManualClock {
     fn now(&self) -> Duration {
-        *lock(&self.now)
+        *mutex(&self.now)
     }
 }
 
@@ -214,7 +212,7 @@ impl<S: Clone> Scheduler<S> {
     /// Schedules a Job; each run starts with a copy of `state`.
     pub fn schedule(&self, timetable: Timetable, origin: JobOrigin, state: S) -> ScheduleId {
         let now = self.clock.now();
-        let mut inner = lock(&self.inner);
+        let mut inner = mutex(&self.inner);
         let id = ScheduleId(inner.next_id);
         inner.next_id += 1;
         inner.entries.insert(
@@ -232,7 +230,7 @@ impl<S: Clone> Scheduler<S> {
 
     /// Stops queueing runs until [`Scheduler::resume`].
     pub fn pause(&self, id: ScheduleId) -> Result<(), ScheduleError> {
-        let mut inner = lock(&self.inner);
+        let mut inner = mutex(&self.inner);
         let entry = inner
             .entries
             .get_mut(&id)
@@ -245,7 +243,7 @@ impl<S: Clone> Scheduler<S> {
     /// paused are not replayed.
     pub fn resume(&self, id: ScheduleId) -> Result<(), ScheduleError> {
         let now = self.clock.now();
-        let mut inner = lock(&self.inner);
+        let mut inner = mutex(&self.inner);
         let entry = inner
             .entries
             .get_mut(&id)
@@ -262,7 +260,7 @@ impl<S: Clone> Scheduler<S> {
     /// Queues one Job per scheduled time that has passed; returns their ids.
     pub fn tick(&self) -> Vec<JobId> {
         let now = self.clock.now();
-        let mut inner = lock(&self.inner);
+        let mut inner = mutex(&self.inner);
         let mut ids: Vec<_> = inner.entries.keys().copied().collect();
         ids.sort();
         let mut queued = Vec::new();

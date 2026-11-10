@@ -9,20 +9,17 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::{Agent, AgentError, AgentNode, AgentTool, Provider, Skill, SkillError, SkillLibrary};
 use crate::{SkillKind, TypedTool};
+use crate::locks::mutex;
 
 /// How many Tool calls make a run worth writing down as a Skill.
 pub const MIN_TOOL_CALLS: usize = 5;
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 tokio::task_local! {
     static RUN_CALLS: Arc<AtomicUsize>;
@@ -110,7 +107,7 @@ impl Learner {
     pub async fn ask(&self, agent: &Agent, request: &str) -> Result<Learned, LearnError> {
         let calls = Arc::new(AtomicUsize::new(0));
         let answer = RUN_CALLS.scope(calls.clone(), agent.ask(request)).await?;
-        lock(&self.last_request).insert(agent.name().into(), request.into());
+        mutex(&self.last_request).insert(agent.name().into(), request.into());
         let tool_calls = calls.load(Ordering::SeqCst);
         let proposed = if tool_calls >= self.min_tool_calls {
             let prompt = format!(
@@ -139,7 +136,7 @@ impl Learner {
         let answer = RUN_CALLS
             .scope(calls.clone(), agent.ask(correction))
             .await?;
-        let earlier = lock(&self.last_request)
+        let earlier = mutex(&self.last_request)
             .get(agent.name())
             .cloned()
             .unwrap_or_default();
@@ -267,7 +264,7 @@ impl Akasha {
         if k.is_empty() {
             return false;
         }
-        let mut all = lock(&self.facts);
+        let mut all = mutex(&self.facts);
         let list = all.entry(role.to_string()).or_default();
         if list.iter().any(|f| fact_key(f) == k) {
             return false;
@@ -278,12 +275,12 @@ impl Akasha {
 
     /// The Roles that have at least one fact.
     pub fn roles(&self) -> Vec<String> {
-        lock(&self.facts).keys().cloned().collect()
+        mutex(&self.facts).keys().cloned().collect()
     }
 
     /// The facts of `role`, oldest first.
     pub fn facts(&self, role: &str) -> Vec<String> {
-        lock(&self.facts).get(role).cloned().unwrap_or_default()
+        mutex(&self.facts).get(role).cloned().unwrap_or_default()
     }
 
     /// The facts every Agent of `agent`'s Role shares.
