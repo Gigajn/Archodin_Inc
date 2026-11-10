@@ -180,3 +180,39 @@ impl Vault {
         Ok(vault)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Panics while holding the vault's write lock, so the lock is poisoned.
+    fn poison(vault: &Vault) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = vault.inner.entries.write().unwrap();
+            panic!("poison the vault lock for the test");
+        }));
+    }
+
+    #[test]
+    fn a_poisoned_vault_lock_recovers_instead_of_panicking() {
+        let vault = Vault::new([7; 32]);
+        vault.put("groq", "sk-test-123");
+        poison(&vault);
+        // Every vault operation must keep working after the poisoning.
+        vault.put("other", "sk-test-456");
+        assert_eq!(
+            vault.names(),
+            vec!["groq".to_string(), "other".to_string()]
+        );
+        assert_eq!(vault.resolve("groq").unwrap().expose(), "sk-test-123");
+        assert_eq!(
+            vault.redact("key sk-test-123 here"),
+            "key [redacted] here"
+        );
+        assert!(vault.remove("other"));
+        let sealed = vault.seal();
+        assert!(!sealed.is_empty());
+        let reopened = Vault::unseal([7; 32], &sealed).unwrap();
+        assert_eq!(reopened.names(), vec!["groq".to_string()]);
+    }
+}

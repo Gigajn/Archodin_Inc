@@ -413,3 +413,39 @@ impl<S: Send + 'static> GraphBuilder<S> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fixed_api_key_is_redacted_from_error_text() {
+        let provider =
+            Provider::openai_compatible("http://localhost:9/v1", "sk-fixed-secret", "m");
+        assert_eq!(
+            provider.redact("provider error: bad key sk-fixed-secret".to_string()),
+            "provider error: bad key [redacted]"
+        );
+        assert_eq!(
+            provider.redact("nothing secret here".to_string()),
+            "nothing secret here"
+        );
+    }
+
+    #[test]
+    fn an_empty_fixed_key_redacts_nothing() {
+        let provider = Provider::openai_compatible("http://localhost:9/v1", "", "m");
+        assert_eq!(provider.redact("plain text".to_string()), "plain text");
+    }
+
+    #[test]
+    fn a_vault_key_is_redacted_from_error_text() {
+        let vault = crate::Vault::new([7; 32]);
+        vault.put("work", "sk-vault-secret");
+        let provider = Provider::from_vault("http://localhost:9/v1", &vault, "work", "m");
+        assert_eq!(
+            provider.redact("bad key sk-vault-secret".to_string()),
+            "bad key [redacted]"
+        );
+    }
+}

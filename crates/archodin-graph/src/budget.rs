@@ -377,3 +377,30 @@ impl<S: Send + 'static> GraphBuilder<S> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Panics while holding the meter's lock, so the lock is poisoned.
+    fn poison(meter: &UsageMeter) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = meter.state.lock().unwrap();
+            panic!("poison the meter lock for the test");
+        }));
+    }
+
+    #[test]
+    fn a_poisoned_meter_lock_recovers_instead_of_panicking() {
+        let meter = UsageMeter::new();
+        meter.record("job-1", "Ada", Usage::new(10, 5, 0.5));
+        poison(&meter);
+        // Every meter operation must keep working after the poisoning.
+        meter.record("job-1", "Ada", Usage::new(10, 5, 0.5));
+        assert_eq!(meter.job_usage("job-1").total_tokens(), 30);
+        assert_eq!(meter.agent_usage("Ada").total_tokens(), 30);
+        meter.set_job_budget("job-1", Budget::tokens(100));
+        assert_eq!(meter.exceeded("job-1", "Ada"), None);
+        meter.approve_overrun(BudgetScope::Job("job-1".into()));
+    }
+}
