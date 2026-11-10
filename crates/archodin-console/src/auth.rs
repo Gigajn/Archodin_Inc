@@ -5,9 +5,23 @@
 //! session is carried by an `HttpOnly` cookie or, for scripts, by an
 //! `Authorization: Bearer` token (both come from `POST /login`). A middleware layer
 //! puts every route, including unknown paths, behind the session.
+//!
+//! Brute force is slowed down in two ways. Argon2 makes each guess expensive,
+//! and failed logins are counted per (client IP, username): after
+//! [`DEFAULT_MAX_FAILED_LOGINS`] failures the key is locked out, with the lockout
+//! doubling on every further failure (capped at [`DEFAULT_MAX_LOCKOUT`]). A
+//! successful login clears the count. Failed attempts and lockouts are logged to
+//! stderr (username and client only, never the password).
+//!
+//! The client is the socket peer ([`ConnectInfo`]) when the server was started
+//! with `into_make_service_with_connect_info`; otherwise it is `"unknown"` and
+//! the limit still applies per username. `X-Forwarded-For` is deliberately NOT
+//! trusted: anyone can send it, so it would let an attacker rotate identities
+//! and dodge the limit.
 
 use std::collections::HashMap;
 use std::fmt;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,7 +30,7 @@ use archodin_graph::locks::mutex;
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Json, Redirect, Response};
@@ -27,6 +41,17 @@ use serde_json::json;
 
 const COOKIE: &str = "agora_session";
 const LOGIN_PAGE: &str = include_str!("login.html");
+
+/// Failed logins allowed per (client, username) before a lockout.
+pub const DEFAULT_MAX_FAILED_LOGINS: u32 = 5;
+/// Lockout after the first [`DEFAULT_MAX_FAILED_LOGINS`] failures; it doubles
+/// on every further failure.
+pub const DEFAULT_LOCKOUT_BASE: Duration = Duration::from_secs(30);
+/// The longest any lockout lasts.
+pub const DEFAULT_MAX_LOCKOUT: Duration = Duration::from_secs(15 * 60);
+/// How long a failed-login record is kept after its last attempt (for the
+/// backoff to keep growing across lockouts); stale records are pruned.
+const ATTEMPT_MEMORY: Duration = Duration::from_secs(3600);
 
 /// Hashes a password with argon2id, for storing in the [`Vault`].
 pub fn hash_password(password: &str) -> String {
@@ -49,18 +74,32 @@ impl fmt::Display for AuthError {
 
 impl std::error::Error for AuthError {}
 
+/// One key the login limit counts: (client, username).
+type AttemptKey = (String, String);
+
+struct Attempt {
+    failures: u32,
+    locked_until: Option<Instant>,
+    last_seen: Instant,
+}
+
 struct Shared {
     username: String,
     hash: String,
     sessions: Mutex<HashMap<String, Instant>>,
+    attempts: Mutex<HashMap<AttemptKey, Attempt>>,
 }
 
-/// The Agora's login. Clones share the same sessions.
+/// The Agora's login. Clones share the same sessions and the same failed-login
+/// counts.
 #[derive(Clone)]
 pub struct Auth {
     shared: Arc<Shared>,
     lifetime: Duration,
     secure_cookie: bool,
+    max_failed_logins: u32,
+    lockout_base: Duration,
+    max_lockout: Duration,
 }
 
 impl Auth {
@@ -86,9 +125,13 @@ impl Auth {
                 username,
                 hash,
                 sessions: Mutex::new(HashMap::new()),
+                attempts: Mutex::new(HashMap::new()),
             }),
             lifetime: Duration::from_secs(12 * 3600),
             secure_cookie: true,
+            max_failed_logins: DEFAULT_MAX_FAILED_LOGINS,
+            lockout_base: DEFAULT_LOCKOUT_BASE,
+            max_lockout: DEFAULT_MAX_LOCKOUT,
         })
     }
 
@@ -105,6 +148,30 @@ impl Auth {
         self
     }
 
+    /// Failed logins allowed per (client, username) before a lockout
+    /// (default [`DEFAULT_MAX_FAILED_LOGINS`]).
+    pub fn failed_login_limit(mut self, n: u32) -> Self {
+        self.max_failed_logins = n.max(1);
+        self
+    }
+
+    /// Lockout after the first failures; it doubles on every further failure
+    /// up to the max lockout (default [`DEFAULT_LOCKOUT_BASE`]). A base longer
+    /// than the max lockout is silently clamped to it; see
+    /// [`Auth::max_lockout`].
+    pub fn lockout_base(mut self, base: Duration) -> Self {
+        self.lockout_base = base;
+        self
+    }
+
+    /// The longest any lockout lasts (default [`DEFAULT_MAX_LOCKOUT`]).
+    /// A [`lockout_base`](Self::lockout_base) longer than this is silently
+    /// clamped to it. Clamped to at least one second.
+    pub fn max_lockout(mut self, max: Duration) -> Self {
+        self.max_lockout = max.max(Duration::from_secs(1));
+        self
+    }
+
     fn check(&self, username: &str, password: &str) -> bool {
         // Always verify, so a wrong username takes as long as a wrong password.
         let hash = PasswordHash::new(&self.shared.hash).expect("checked at construction");
@@ -112,6 +179,69 @@ impl Auth {
             .verify_password(password.as_bytes(), &hash)
             .is_ok();
         username == self.shared.username && password_ok
+    }
+
+    /// Whether this (client, username) may try to log in right now. Also
+    /// prunes stale failed-login records so the map stays bounded.
+    fn login_allowed(&self, key: &AttemptKey) -> bool {
+        let now = Instant::now();
+        let mut attempts = mutex(&self.shared.attempts);
+        attempts.retain(|_, a| {
+            a.locked_until.is_some_and(|until| until > now)
+                || now.duration_since(a.last_seen) < ATTEMPT_MEMORY
+        });
+        !matches!(
+            attempts.get(key),
+            Some(a) if a.locked_until.is_some_and(|until| until > now)
+        )
+    }
+
+    /// How long the lockout lasts for this many consecutive failures.
+    fn lockout_duration(&self, failures: u32) -> Duration {
+        let extra = failures.saturating_sub(self.max_failed_logins);
+        let mut secs = self.lockout_base.as_secs().max(1);
+        for _ in 0..extra.min(10) {
+            secs = secs.saturating_mul(2);
+        }
+        Duration::from_secs(secs.min(self.max_lockout.as_secs()))
+    }
+
+    /// Records a failed login. Returns true if this failure tripped (or
+    /// re-tripped) a lockout. Logs the username and client, never the password.
+    fn record_failed_login(&self, key: AttemptKey) -> bool {
+        let mut attempts = mutex(&self.shared.attempts);
+        let now = Instant::now();
+        let entry = attempts.entry(key.clone()).or_insert_with(|| Attempt {
+            failures: 0,
+            locked_until: None,
+            last_seen: now,
+        });
+        entry.failures += 1;
+        entry.last_seen = now;
+        if entry.failures >= self.max_failed_logins {
+            let wait = self.lockout_duration(entry.failures);
+            entry.locked_until = Some(now + wait);
+            eprintln!(
+                "[agora] login locked out: user `{}` from {} after {} failed attempts; "
+                "retry in {}s",
+                key.1,
+                key.0,
+                entry.failures,
+                wait.as_secs()
+            );
+            true
+        } else {
+            eprintln!(
+                "[agora] failed login: user `{}` from {} (attempt {} of {})",
+                key.1, key.0, entry.failures, self.max_failed_logins
+            );
+            false
+        }
+    }
+
+    /// A successful login clears the failed-login count for this key.
+    fn record_successful_login(&self, key: &AttemptKey) {
+        mutex(&self.shared.attempts).remove(key);
     }
 
     fn open_session(&self) -> String {
@@ -226,18 +356,40 @@ struct Credentials {
     password: String,
 }
 
-async fn login_submit(State(auth): State<Auth>, Json(c): Json<Credentials>) -> Response {
-    let checker = auth.clone();
-    let ok = tokio::task::spawn_blocking(move || checker.check(&c.username, &c.password))
-        .await
-        .unwrap_or(false);
-    if !ok {
+async fn login_submit(
+    State(auth): State<Auth>,
+    connect: Option<ConnectInfo<SocketAddr>>,
+    Json(c): Json<Credentials>,
+) -> Response {
+    let client = connect
+        .map(|ConnectInfo(addr)| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let key: AttemptKey = (client, c.username.clone());
+    if !auth.login_allowed(&key) {
         return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "wrong username or password"})),
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error": "too many failed logins, try again later"})),
         )
             .into_response();
     }
+    let checker = auth.clone();
+    let (username, password) = (c.username, c.password);
+    let ok = tokio::task::spawn_blocking(move || checker.check(&username, &password))
+        .await
+        .unwrap_or(false);
+    if !ok {
+        let locked_out = auth.record_failed_login(key);
+        let (status, error) = if locked_out {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many failed logins, try again later",
+            )
+        } else {
+            (StatusCode::UNAUTHORIZED, "wrong username or password")
+        };
+        return (status, Json(json!({"error": error}))).into_response();
+    }
+    auth.record_successful_login(&key);
     let token = auth.open_session();
     let mut response = Json(json!({"token": token})).into_response();
     response.headers_mut().insert(
@@ -257,3 +409,36 @@ async fn logout(State(auth): State<Auth>, headers: HeaderMap) -> Response {
         .insert(header::SET_COOKIE, auth.cookie("", 0));
     response
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn auth_with(base: Duration, max: Duration) -> Auth {
+        let vault = Vault::new([0; 32]);
+        vault.put("u", "kudo");
+        vault.put("h", &hash_password("pw"));
+        Auth::from_vault(&vault, "u", "h")
+            .unwrap()
+            .lockout_base(base)
+            .max_lockout(max)
+    }
+
+    #[test]
+    fn lockout_doubles_each_failure_and_stops_at_the_cap() {
+        let auth = auth_with(Duration::from_secs(2), Duration::from_secs(15 * 60));
+        // The 5th failure (the limit) trips the base lockout; each failure
+        // after that doubles it until the cap binds.
+        assert_eq!(auth.lockout_duration(5), Duration::from_secs(2));
+        assert_eq!(auth.lockout_duration(6), Duration::from_secs(4));
+        assert_eq!(auth.lockout_duration(7), Duration::from_secs(8));
+        assert_eq!(auth.lockout_duration(100), Duration::from_secs(15 * 60));
+    }
+
+    #[test]
+    fn lockout_base_above_the_max_is_clamped() {
+        let auth = auth_with(Duration::from_secs(3600), Duration::from_secs(60));
+        assert_eq!(auth.lockout_duration(5), Duration::from_secs(60));
+    }
+}
+
