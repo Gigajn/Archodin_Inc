@@ -35,6 +35,51 @@ fn visit(name: &'static str) -> impl Fn(Ticket) -> std::future::Ready<Ticket> + 
 }
 
 
+/// A graph whose conditional router returns a target that is not declared.
+fn undeclared_target_graph() -> Graph<Ticket> {
+    Graph::builder()
+        .node("triage", visit("triage"))
+        .node("escalate", visit("escalate"))
+        .node("archive", visit("archive"))
+        .entry("triage")
+        .conditional_edge("triage", |_| "nowhere", &["escalate", "archive"])
+        .edge("escalate", END)
+        .edge("archive", END)
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_conditional_edge_returning_an_undeclared_target_fails_instead_of_panicking() {
+    let err = undeclared_target_graph().run(ticket(false)).await;
+    assert_eq!(
+        err,
+        Err(GraphError::UnknownConditionalTarget {
+            node: "triage".into(),
+            target: "nowhere".into(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_conditional_edge_returning_an_undeclared_target_fails_a_durable_job_too() {
+    let store = InMemoryCheckpointStore::<Ticket>::new();
+    let err = undeclared_target_graph()
+        .run_job(
+            "job-1",
+            ticket(false),
+            &store,
+            &ScriptedApprover::new([]),
+        )
+        .await;
+    assert_eq!(
+        err,
+        Err(GraphError::UnknownConditionalTarget {
+            node: "triage".into(),
+            target: "nowhere".into(),
+        })
+    );
+}
 #[derive(Debug, Clone, PartialEq)]
 struct Tally {
     total: u32,
