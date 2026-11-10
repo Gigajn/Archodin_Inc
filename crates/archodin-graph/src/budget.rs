@@ -42,11 +42,12 @@
 //! restored when a Job resumes.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
 
+use crate::locks::mutex;
 use crate::{ApprovalDecision, ApprovalRequest, Approver, GraphBuilder};
 
 /// How long one approved overrun stays usable: a single over-budget step may
@@ -265,16 +266,6 @@ struct MeterState {
     node_agents: HashMap<String, String>,
 }
 
-/// Lock a mutex, recovering from poisoning like the helper in `roster.rs:111`.
-/// New code in this file must use this instead of `lock().unwrap()` (KR-11).
-/// NOTE: this is a temporary duplicate of `roster.rs:111`. The KR-06+KR-11
-/// group provides the shared `archodin_graph::locks::mutex` on their branch;
-/// when the branches merge, both helpers are replaced by that one. Do not
-/// create a second shared helper here.
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// Adds two usages, saturating the token counts instead of overflowing.
 fn saturating_add_usage(a: Usage, b: Usage) -> Usage {
     Usage {
@@ -333,7 +324,7 @@ impl UsageMeter {
             );
             return;
         }
-        let mut s = lock(&self.state);
+        let mut s = mutex(&self.state);
         s.by_job.entry(job.to_string()).or_default().add(usage);
         s.by_agent.entry(agent.to_string()).or_default().add(usage);
     }
@@ -439,7 +430,7 @@ impl UsageMeter {
             granted_at: now,
             expires_at: now + ttl,
         };
-        let _ = lock(&self.state).waivers.insert(scope, waiver);
+        let _ = mutex(&self.state).waivers.insert(scope, waiver);
     }
 
     /// Consumes the valid waiver for `scope`, if there is one. Returns whether
@@ -448,7 +439,7 @@ impl UsageMeter {
     /// atomically under its own lock (it cannot call this method — that would
     /// re-lock); the read-only [`UsageMeter::exceeded`] never consumes.
     pub fn try_consume_waiver(&self, scope: &BudgetScope) -> bool {
-        let mut s = lock(&self.state);
+        let mut s = mutex(&self.state);
         if is_waiver_valid(&s.waivers, scope) {
             let _ = s.waivers.remove(scope);
             true
@@ -460,7 +451,7 @@ impl UsageMeter {
     /// Who approved the currently valid waiver for `scope`, if there is one.
     /// `None` when there is no waiver or it expired / was consumed.
     pub fn waiver_approver(&self, scope: &BudgetScope) -> Option<String> {
-        let s = lock(&self.state);
+        let s = mutex(&self.state);
         if is_waiver_valid(&s.waivers, scope) {
             s.waivers.get(scope).map(|w| w.approver.clone())
         } else {
@@ -493,7 +484,7 @@ impl UsageMeter {
                 "estimated cost must be finite and non-negative",
             ));
         }
-        let mut s = lock(&self.state);
+        let mut s = mutex(&self.state);
         let checks = [
             (
                 BudgetScope::Job(job.to_string()),
@@ -579,7 +570,7 @@ impl Reservation<'_> {
             );
             return;
         }
-        let mut s = lock(&self.meter.state);
+        let mut s = mutex(&self.meter.state);
         adjust_usage(&mut s.by_job, &self.job, self.estimated, actual);
         adjust_usage(&mut s.by_agent, &self.agent, self.estimated, actual);
     }
@@ -595,7 +586,7 @@ impl Drop for Reservation<'_> {
             return;
         }
         self.settled = true;
-        let mut s = lock(&self.meter.state);
+        let mut s = mutex(&self.meter.state);
         refund_usage(&mut s.by_job, &self.job, self.estimated);
         refund_usage(&mut s.by_agent, &self.agent, self.estimated);
     }
@@ -1035,4 +1026,27 @@ mod tests {
         assert_eq!(used.total_tokens(), 60);
         assert!((used.cost - 1.0).abs() < 1e-9);
     }
+
+    /// Panics while holding the meter's lock, so the lock is poisoned.
+    fn poison(meter: &UsageMeter) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = meter.state.lock().unwrap();
+            panic!("poison the meter lock for the test");
+        }));
+    }
+
+    #[test]
+    fn a_poisoned_meter_lock_recovers_instead_of_panicking() {
+        let meter = UsageMeter::new();
+        meter.record("job-1", "Ada", Usage::new(10, 5, 0.5));
+        poison(&meter);
+        // Every meter operation must keep working after the poisoning.
+        meter.record("job-1", "Ada", Usage::new(10, 5, 0.5));
+        assert_eq!(meter.job_usage("job-1").total_tokens(), 30);
+        assert_eq!(meter.agent_usage("Ada").total_tokens(), 30);
+        meter.set_job_budget("job-1", Budget::tokens(100));
+        assert_eq!(meter.exceeded("job-1", "Ada"), None);
+        meter.approve_overrun(BudgetScope::Job("job-1".into()), "tester");
+    }
 }
+
