@@ -1,8 +1,9 @@
 //! The in-memory backend, behind the same traits as the databases.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
+use archodin_graph::locks::mutex;
 use archodin_graph::{fact_key, Checkpoint, CheckpointStore, SkillSnapshot};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
@@ -28,10 +29,6 @@ pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
 }
 
-fn lock(m: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 fn invalid(e: impl std::fmt::Display) -> StoreError {
     StoreError::Invalid(e.to_string())
 }
@@ -50,7 +47,7 @@ where
     fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, Result<(), StoreError>> {
         Box::pin(async move {
             let state = serde_json::to_string(&checkpoint.state).map_err(invalid)?;
-            lock(&self.inner)
+            mutex(&self.inner)
                 .checkpoints
                 .entry(checkpoint.job)
                 .or_default()
@@ -61,7 +58,7 @@ where
 
     fn checkpoints(&self, job: &str) -> BoxFuture<'_, Result<Vec<Checkpoint<S>>, StoreError>> {
         let job = job.to_string();
-        let rows = lock(&self.inner)
+        let rows = mutex(&self.inner)
             .checkpoints
             .get(&job)
             .cloned()
@@ -85,18 +82,18 @@ where
 #[async_trait]
 impl RosterStore for MemoryStore {
     async fn save_role(&self, role: &RoleRecord) -> Result<(), StoreError> {
-        lock(&self.inner)
+        mutex(&self.inner)
             .roles
             .insert(role.name.clone(), role.clone());
         Ok(())
     }
 
     async fn roles(&self) -> Result<Vec<RoleRecord>, StoreError> {
-        Ok(lock(&self.inner).roles.values().cloned().collect())
+        Ok(mutex(&self.inner).roles.values().cloned().collect())
     }
 
     async fn save_agent(&self, agent: &AgentRecord) -> Result<(), StoreError> {
-        let mut inner = lock(&self.inner);
+        let mut inner = mutex(&self.inner);
         match inner.agents.iter_mut().find(|a| a.name == agent.name) {
             Some(existing) => *existing = agent.clone(),
             None => inner.agents.push(agent.clone()),
@@ -105,26 +102,26 @@ impl RosterStore for MemoryStore {
     }
 
     async fn remove_agent(&self, name: &str) -> Result<bool, StoreError> {
-        let mut inner = lock(&self.inner);
+        let mut inner = mutex(&self.inner);
         let before = inner.agents.len();
         inner.agents.retain(|a| a.name != name);
         Ok(inner.agents.len() != before)
     }
 
     async fn agents(&self) -> Result<Vec<AgentRecord>, StoreError> {
-        Ok(lock(&self.inner).agents.clone())
+        Ok(mutex(&self.inner).agents.clone())
     }
 }
 
 #[async_trait]
 impl SkillStore for MemoryStore {
     async fn save_skills(&self, snapshot: &SkillSnapshot) -> Result<(), StoreError> {
-        lock(&self.inner).skills = snapshot.clone();
+        mutex(&self.inner).skills = snapshot.clone();
         Ok(())
     }
 
     async fn load_skills(&self) -> Result<SkillSnapshot, StoreError> {
-        Ok(lock(&self.inner).skills.clone())
+        Ok(mutex(&self.inner).skills.clone())
     }
 }
 
@@ -136,7 +133,7 @@ impl AkashaStore for MemoryStore {
         if key.is_empty() {
             return Ok(false);
         }
-        let mut inner = lock(&self.inner);
+        let mut inner = mutex(&self.inner);
         let list = inner.facts.entry(role.to_string()).or_default();
         if list.iter().any(|f| fact_key(f) == key) {
             return Ok(false);
@@ -146,7 +143,7 @@ impl AkashaStore for MemoryStore {
     }
 
     async fn facts(&self, role: &str) -> Result<Vec<String>, StoreError> {
-        Ok(lock(&self.inner)
+        Ok(mutex(&self.inner)
             .facts
             .get(role)
             .cloned()
@@ -154,6 +151,7 @@ impl AkashaStore for MemoryStore {
     }
 
     async fn fact_roles(&self) -> Result<Vec<String>, StoreError> {
-        Ok(lock(&self.inner).facts.keys().cloned().collect())
+        Ok(mutex(&self.inner).facts.keys().cloned().collect())
     }
 }
+
