@@ -22,6 +22,7 @@ use crate::{
     Issue, JobId, JobOrigin, JobQueue, OpenPullRequest, PullRequest, PullRequestDraft, RepoInfo,
     RepoRef, Sandbox, SandboxError, UsageMeter,
 };
+use crate::locks::mutex;
 
 /// Branches Forja may never write to, whatever the repository.
 const PROTECTED_BRANCHES: [&str; 2] = ["main", "master"];
@@ -31,10 +32,6 @@ fn forbidden(what: String) -> GitHubError {
         status: 403,
         body: format!("Forja may not {what}"),
     }
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// A branch name as git sees it, whatever the spelling (`refs/heads/main`,
@@ -70,7 +67,7 @@ impl<G: GitHub> ForjaGitHub<G> {
 
     /// Also refuses writes to `branch` (in any spelling).
     pub fn protect(self, branch: impl AsRef<str>) -> Self {
-        lock(&self.protected).push(normalize(branch.as_ref()));
+        mutex(&self.protected).push(normalize(branch.as_ref()));
         self
     }
 
@@ -83,10 +80,10 @@ impl<G: GitHub> ForjaGitHub<G> {
     /// knows (it learns the default branch of the home repository when it reads it).
     pub fn allows_branch(&self, repo: &RepoRef, branch: &str) -> Result<(), GitHubError> {
         let name = normalize(branch);
-        let default = lock(&self.default_branch).clone();
+        let default = mutex(&self.default_branch).clone();
         let is_default =
             *repo == self.home && default.as_deref().map(normalize) == Some(name.clone());
-        if name.is_empty() || is_default || lock(&self.protected).contains(&name) {
+        if name.is_empty() || is_default || mutex(&self.protected).contains(&name) {
             return Err(forbidden(format!("write to `{branch}` of {repo}")));
         }
         Ok(())
@@ -95,7 +92,7 @@ impl<G: GitHub> ForjaGitHub<G> {
     /// Checks a write, reading the home repository's default branch first when
     /// it is not known yet.
     async fn guard(&self, repo: &RepoRef, branch: &str) -> Result<(), GitHubError> {
-        if *repo == self.home && lock(&self.default_branch).is_none() {
+        if *repo == self.home && mutex(&self.default_branch).is_none() {
             self.repository(&self.home).await?;
         }
         self.allows_branch(repo, branch)
@@ -108,7 +105,7 @@ impl<G: GitHub> GitHub for ForjaGitHub<G> {
         Box::pin(async move {
             let info = self.inner.repository(&repo).await?;
             if repo == self.home {
-                *lock(&self.default_branch) = Some(info.default_branch.clone());
+                *mutex(&self.default_branch) = Some(info.default_branch.clone());
             }
             Ok(info)
         })
@@ -450,7 +447,7 @@ impl Forja {
         }
         let issues = github.open_issues(&self.home).await?;
         let pulls = github.open_pull_requests(&self.home).await?;
-        let mut tickets = lock(&self.tickets);
+        let mut tickets = mutex(&self.tickets);
         Ok(issues
             .iter()
             .filter(|i| ready(i))
@@ -479,7 +476,7 @@ impl Forja {
         let result = self
             .build_inner(sandbox, github, meter, agent, ticket, work)
             .await;
-        let mut tickets = lock(&self.tickets);
+        let mut tickets = mutex(&self.tickets);
         match &result {
             Ok(_) => {
                 tickets.claimed.remove(&ticket.number);

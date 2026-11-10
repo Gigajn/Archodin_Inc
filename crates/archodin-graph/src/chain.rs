@@ -95,8 +95,10 @@ impl ModelChain {
         self
     }
 
-    pub(crate) fn provider(&self, index: usize) -> &Provider {
-        &self.pairs[index]
+    /// The pair at `index`, or `None` when there is none: an out-of-range
+    /// index is a bug in the caller, not a reason to panic the job.
+    pub(crate) fn provider(&self, index: usize) -> Option<&Provider> {
+        self.pairs.get(index)
     }
 
     /// Calls the model, starting at pair `*current` and advancing it on failures.
@@ -108,9 +110,16 @@ impl ModelChain {
         report: Option<&Arc<dyn Fn(ChainEvent) + Send + Sync>>,
     ) -> Result<GenerateResult, AgentError> {
         loop {
-            let provider = &self.pairs[*current];
+            // `current` only advances while a next pair exists, so this is
+            // unreachable in practice; an out-of-range index is a caller
+            // bug, reported as an error rather than a panic.
+            let Some(provider) = self.pairs.get(*current) else {
+                return Err(AgentError::Provider(
+                    "the Model chain has no pair at the current index".into(),
+                ));
+            };
             let outcome = match provider.llm(tools) {
-                Err(text) => Err(FallbackReason::Error(text)),
+                Err(text) => Err(FallbackReason::Error(provider.redact(text))),
                 Ok(llm) => {
                     let call = llm.generate(messages);
                     let outcome = match self.timeout {
@@ -158,5 +167,22 @@ fn classify(error: String) -> FallbackReason {
         FallbackReason::RateLimited
     } else {
         FallbackReason::Error(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_returns_none_for_an_out_of_range_index_instead_of_panicking() {
+        let chain = ModelChain::new(Provider::openai_compatible(
+            "http://localhost:9/v1",
+            "key",
+            "model",
+        ));
+        assert!(chain.provider(0).is_some());
+        assert!(chain.provider(1).is_none());
+        assert!(chain.provider(usize::MAX).is_none());
     }
 }

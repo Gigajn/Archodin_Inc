@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
 
+use crate::locks::mutex;
 use crate::{ApprovalDecision, ApprovalRequest, Approver, GraphBuilder};
 
 /// Tokens used and money spent.
@@ -164,40 +165,40 @@ impl UsageMeter {
 
     /// Records that `agent` used `usage` working on `job`.
     pub fn record(&self, job: &str, agent: &str, usage: Usage) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = mutex(&self.state);
         s.by_job.entry(job.to_string()).or_default().add(usage);
         s.by_agent.entry(agent.to_string()).or_default().add(usage);
     }
 
     /// Everything `job` has used so far.
     pub fn job_usage(&self, job: &str) -> Usage {
-        let s = self.state.lock().unwrap();
+        let s = mutex(&self.state);
         s.by_job.get(job).copied().unwrap_or_default()
     }
 
     /// Everything `agent` has used so far, across Jobs.
     pub fn agent_usage(&self, agent: &str) -> Usage {
-        let s = self.state.lock().unwrap();
+        let s = mutex(&self.state);
         s.by_agent.get(agent).copied().unwrap_or_default()
     }
 
     /// Sets the Budget of a Job.
     pub fn set_job_budget(&self, job: &str, budget: Budget) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = mutex(&self.state);
         s.job_budgets.insert(job.to_string(), budget);
         s.waived.retain(|w| *w != BudgetScope::Job(job.to_string()));
     }
 
     /// Sets the Budget of an Agent, counted across all its Jobs.
     pub fn set_agent_budget(&self, agent: &str, budget: Budget) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = mutex(&self.state);
         s.agent_budgets.insert(agent.to_string(), budget);
         s.waived
             .retain(|w| *w != BudgetScope::Agent(agent.to_string()));
     }
 
     fn set_agent_budget_if_unset(&self, agent: &str, budget: Budget) {
-        let unset = !self.state.lock().unwrap().agent_budgets.contains_key(agent);
+        let unset = !mutex(&self.state).agent_budgets.contains_key(agent);
         if unset {
             self.set_agent_budget(agent, budget);
         }
@@ -210,7 +211,7 @@ impl UsageMeter {
     }
 
     fn exceeded_with_reason(&self, job: &str, agent: &str) -> Option<(BudgetScope, String)> {
-        let s = self.state.lock().unwrap();
+        let s = mutex(&self.state);
         let checks = [
             (
                 BudgetScope::Job(job.to_string()),
@@ -241,22 +242,20 @@ impl UsageMeter {
 
     /// Records that a person approved the overrun of this Budget: it asks no more.
     pub fn approve_overrun(&self, scope: BudgetScope) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = mutex(&self.state);
         if !s.waived.contains(&scope) {
             s.waived.push(scope);
         }
     }
 
     fn register_node(&self, node: &str, agent: &str) {
-        self.state
-            .lock()
-            .unwrap()
+        mutex(&self.state)
             .node_agents
             .insert(node.to_string(), agent.to_string());
     }
 
     fn agent_of(&self, node: &str) -> Option<String> {
-        self.state.lock().unwrap().node_agents.get(node).cloned()
+        mutex(&self.state).node_agents.get(node).cloned()
     }
 }
 
@@ -375,5 +374,32 @@ impl<S: Send + 'static> GraphBuilder<S> {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Panics while holding the meter's lock, so the lock is poisoned.
+    fn poison(meter: &UsageMeter) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = meter.state.lock().unwrap();
+            panic!("poison the meter lock for the test");
+        }));
+    }
+
+    #[test]
+    fn a_poisoned_meter_lock_recovers_instead_of_panicking() {
+        let meter = UsageMeter::new();
+        meter.record("job-1", "Ada", Usage::new(10, 5, 0.5));
+        poison(&meter);
+        // Every meter operation must keep working after the poisoning.
+        meter.record("job-1", "Ada", Usage::new(10, 5, 0.5));
+        assert_eq!(meter.job_usage("job-1").total_tokens(), 30);
+        assert_eq!(meter.agent_usage("Ada").total_tokens(), 30);
+        meter.set_job_budget("job-1", Budget::tokens(100));
+        assert_eq!(meter.exceeded("job-1", "Ada"), None);
+        meter.approve_overrun(BudgetScope::Job("job-1".into()));
     }
 }

@@ -26,6 +26,7 @@ use crate::{
     branch_name, ApprovalDecision, ApprovalRequest, Approver, Budget, JobId, JobOrigin, JobQueue,
     Nakama, Roster, UsageMeter, Workload,
 };
+use crate::locks::mutex;
 
 /// A GitHub repository: owner and name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -352,7 +353,7 @@ impl ScriptedGitHub {
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, ScriptedGitHubState> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        mutex(&self.state)
     }
 
     fn own(&self, repo: &RepoRef) -> Result<(), GitHubError> {
@@ -962,7 +963,7 @@ impl Explorador {
                 let proposals = nakama.propose(roster, &workload);
                 for applied in nakama.resolve(roster, proposals, &approved).await {
                     if let crate::Proposal::Hire { agent, .. } = applied {
-                        lock(&department.inner.agents).push(agent);
+                        mutex(&department.inner.agents).push(agent);
                     }
                 }
             }
@@ -977,10 +978,6 @@ impl Approver for ScriptedAlways {
     fn decide(&self, _: &ApprovalRequest) -> BoxFuture<'_, ApprovalDecision> {
         Box::pin(async { ApprovalDecision::Approved })
     }
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Work an Agent wants to contribute to the Department's repository.
@@ -1046,7 +1043,7 @@ impl Department {
 
     /// The Agents Nakama hired for it.
     pub fn agents(&self) -> Vec<String> {
-        lock(&self.inner.agents).clone()
+        mutex(&self.inner.agents).clone()
     }
 
     /// The name under which its spending is recorded on a [`UsageMeter`] (as an
@@ -1075,7 +1072,7 @@ impl Department {
             return Ok(Vec::new());
         }
         let issues = github.open_issues(repo).await?;
-        let mut seen = lock(&self.inner.seen_issues);
+        let mut seen = mutex(&self.inner.seen_issues);
         Ok(issues
             .iter()
             .filter(|i| seen.insert(i.number))
@@ -1097,7 +1094,7 @@ impl Department {
             .source
             .as_ref()
             .ok_or(ExploradorError::NoRepository)?;
-        if !lock(&self.inner.agents).iter().any(|a| a == agent) {
+        if !mutex(&self.inner.agents).iter().any(|a| a == agent) {
             return Err(ExploradorError::NotMember(agent.into()));
         }
         let info = github.repository(upstream).await?;
@@ -1131,6 +1128,6 @@ impl Department {
 impl Department {
     /// Records an Agent hired for the Department after it opened (used by upgrades).
     pub(crate) fn add_agent(&self, name: String) {
-        lock(&self.inner.agents).push(name);
+        mutex(&self.inner.agents).push(name);
     }
 }

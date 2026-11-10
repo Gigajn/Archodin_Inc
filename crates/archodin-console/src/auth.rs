@@ -8,10 +8,11 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use archodin_graph::Vault;
+use archodin_graph::locks::mutex;
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -60,10 +61,6 @@ pub struct Auth {
     shared: Arc<Shared>,
     lifetime: Duration,
     secure_cookie: bool,
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Auth {
@@ -121,7 +118,7 @@ impl Auth {
         let mut bytes = [0u8; 32];
         OsRng.fill_bytes(&mut bytes);
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        let mut sessions = lock(&self.shared.sessions);
+        let mut sessions = mutex(&self.shared.sessions);
         let now = Instant::now();
         sessions.retain(|_, expires| *expires > now);
         sessions.insert(token.clone(), now + self.lifetime);
@@ -129,7 +126,7 @@ impl Auth {
     }
 
     fn valid(&self, token: &str) -> bool {
-        let mut sessions = lock(&self.shared.sessions);
+        let mut sessions = mutex(&self.shared.sessions);
         match sessions.get(token) {
             Some(expires) if *expires > Instant::now() => true,
             Some(_) => {
@@ -141,7 +138,7 @@ impl Auth {
     }
 
     fn close_session(&self, token: &str) {
-        lock(&self.shared.sessions).remove(token);
+        mutex(&self.shared.sessions).remove(token);
     }
 
     fn cookie(&self, value: &str, max_age: u64) -> HeaderValue {

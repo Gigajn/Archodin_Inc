@@ -142,6 +142,9 @@ pub enum FanoutError {
     /// No parallel Node was added.
     #[error("the fanout has no parallel nodes")]
     NoNodes,
+    /// The fanout stream ended without a final state.
+    #[error("the fanout stream ended without a final state")]
+    StreamEnded,
 }
 
 /// Builds a [`Fanout`].
@@ -213,7 +216,9 @@ pub struct Fanout<S> {
 enum Stage<S> {
     Begin(S),
     SourceStart(S),
-    SourceRun(S),
+    /// The source node travels with its stage, so running it cannot fail
+    /// to find it.
+    SourceRun(S, String, NodeFn<S>),
     BranchesStart(S),
     BranchesRun(S),
     Done,
@@ -255,16 +260,14 @@ impl<S: Clone + Send + Sync + 'static> Fanout<S> {
                             run.stage = Stage::SourceStart(s);
                         }
                         Stage::SourceStart(s) => match &inner.source {
-                            Some((name, _)) => {
+                            Some((name, f)) => {
                                 run.queue
                                     .push_back(JobEvent::NodeStarted { node: name.clone() });
-                                run.stage = Stage::SourceRun(s);
+                                run.stage = Stage::SourceRun(s, name.clone(), f.clone());
                             }
                             None => run.stage = Stage::BranchesStart(s),
                         },
-                        Stage::SourceRun(s) => {
-                            let (name, f) =
-                                inner.source.as_ref().expect("source stage has a source");
+                        Stage::SourceRun(s, name, f) => {
                             let updated = f(s).await;
                             run.queue
                                 .push_back(JobEvent::NodeFinished { node: name.clone() });
@@ -326,6 +329,6 @@ impl<S: Clone + Send + Sync + 'static> Fanout<S> {
                 return Ok(state);
             }
         }
-        unreachable!("a Job stream always ends with JobFinished")
+        Err(FanoutError::StreamEnded)
     }
 }
