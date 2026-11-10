@@ -148,6 +148,13 @@ pub enum JobUpdate {
     JobRejected { node: String, state: String },
     /// The Job hit its Step limit.
     StepLimitReached { limit: usize, state: String },
+    /// A durable Job's Checkpoint store failed; the Job stopped.
+    /// `error` is the store's message. This is the one failure variant
+    /// for Job-level errors: both `JobEvent::CheckpointFailed` (a store
+    /// failure) and, once KR-06 lands, `JobEvent::JobFailed` (a graph
+    /// failure) map here, so the Agora never needs a new variant per
+    /// failure source.
+    JobFailed { error: String },
     /// A person cancelled the Job.
     Cancelled,
     /// An answer arrived and the Job continues.
@@ -190,6 +197,9 @@ impl JobUpdate {
                 limit: *limit,
                 state: format!("{state:?}"),
             },
+            JobEvent::CheckpointFailed { error } => Self::JobFailed {
+                error: error.to_string(),
+            },
         }
     }
 
@@ -216,6 +226,12 @@ impl JobSink {
 }
 
 /// Sends every event of a Graph's stream to `sink`.
+///
+/// A `JobEvent::CheckpointFailed` arrives as a `JobUpdate::JobFailed` and
+/// marks the Job `Failed`, so a Job whose Checkpoint save fails after a
+/// `NodeStarted` still ends terminally — the `NodeStarted` simply never
+/// gets its matching `NodeFinished`. The pump tolerates that unpaired
+/// event: it forwards whatever the stream yields, in order.
 pub async fn pump<S: Debug>(mut events: impl Stream<Item = JobEvent<S>> + Unpin, sink: &JobSink) {
     while let Some(event) = events.next().await {
         sink.emit(JobUpdate::from_event(&event));
@@ -475,6 +491,7 @@ impl Agora {
                 JobUpdate::JobPaused { .. } => job.status = Status::Paused,
                 JobUpdate::JobRejected { .. } => job.status = Status::Rejected,
                 JobUpdate::StepLimitReached { .. } => job.status = Status::Failed,
+                JobUpdate::JobFailed { .. } => job.status = Status::Failed,
                 _ => {}
             }
             job.events.push(update);
