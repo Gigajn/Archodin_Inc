@@ -57,13 +57,14 @@ pub use notify::{EmailNotifier, Mailer, Notification, Notifier, NotifyError, Tel
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use archodin_graph::{
     ApprovalDecision, ApprovalRequest, Approver, JobEvent, JobOrigin, JobQueue, McpLibrary,
     SkillLibrary, Usage, UsageMeter,
 };
+use archodin_graph::locks::mutex;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
@@ -164,6 +165,13 @@ pub enum JobUpdate {
     JobRejected { node: String, state: String },
     /// The Job hit its Step limit.
     StepLimitReached { limit: usize, state: String },
+    /// The Job failed with an error that could not be recovered. This is
+    /// the one failure variant for Job-level errors: both
+    /// `JobEvent::JobFailed` (a graph failure) and
+    /// `JobEvent::CheckpointFailed` (a store failure) map here via
+    /// `error.to_string()`, so the Agora never needs a new variant per
+    /// failure source.
+    JobFailed { error: String },
     /// A person cancelled the Job.
     Cancelled,
     /// An answer arrived and the Job continues.
@@ -206,6 +214,12 @@ impl JobUpdate {
                 limit: *limit,
                 state: format!("{state:?}"),
             },
+            JobEvent::CheckpointFailed { error } => Self::JobFailed {
+                error: error.to_string(),
+            },
+            JobEvent::JobFailed { error } => Self::JobFailed {
+                error: error.to_string(),
+            },
         }
     }
 
@@ -232,6 +246,12 @@ impl JobSink {
 }
 
 /// Sends every event of a Graph's stream to `sink`.
+///
+/// A `JobEvent::CheckpointFailed` arrives as a `JobUpdate::JobFailed` and
+/// marks the Job `Failed`, so a Job whose Checkpoint save fails after a
+/// `NodeStarted` still ends terminally — the `NodeStarted` simply never
+/// gets its matching `NodeFinished`. The pump tolerates that unpaired
+/// event: it forwards whatever the stream yields, in order.
 pub async fn pump<S: Debug>(mut events: impl Stream<Item = JobEvent<S>> + Unpin, sink: &JobSink) {
     while let Some(event) = events.next().await {
         sink.emit(JobUpdate::from_event(&event));
@@ -555,10 +575,6 @@ fn prune_decided(s: &mut State_, max: usize) {
     }
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 fn job_name(id: u64) -> String {
     format!("job-{id}")
 }
@@ -594,7 +610,7 @@ impl Agora {
 
     fn emit(&self, id: u64, update: JobUpdate) {
         {
-            let mut s = lock(&self.inner.state);
+            let mut s = mutex(&self.inner.state);
             let Some(job) = s.jobs.get_mut(&id) else {
                 return;
             };
@@ -606,6 +622,7 @@ impl Agora {
                 JobUpdate::JobPaused { .. } => job.status = Status::Paused,
                 JobUpdate::JobRejected { .. } => job.status = Status::Rejected,
                 JobUpdate::StepLimitReached { .. } => job.status = Status::Failed,
+                JobUpdate::JobFailed { .. } => job.status = Status::Failed,
                 _ => {}
             }
             job.events.push(update);
@@ -628,7 +645,7 @@ impl Agora {
     pub fn submit(&self, request: JobRequest) -> Result<u64, String> {
         request.validate()?;
         let id = {
-            let mut s = lock(&self.inner.state);
+            let mut s = mutex(&self.inner.state);
             while s.jobs.len() >= self.inner.max_jobs {
                 let Some(oldest) = s
                     .jobs
@@ -663,7 +680,7 @@ impl Agora {
     fn start_queued(&self) {
         loop {
             let id = {
-                let s = lock(&self.inner.state);
+                let s = mutex(&self.inner.state);
                 let running = s
                     .jobs
                     .values()
@@ -678,7 +695,7 @@ impl Agora {
                     None => return,
                 }
             };
-            let queued = lock(&self.inner.state)
+            let queued = mutex(&self.inner.state)
                 .jobs
                 .get(&id)
                 .is_some_and(|j| j.status == Status::Queued);
@@ -690,7 +707,7 @@ impl Agora {
 
     fn spawn(&self, id: u64, resumed: bool) {
         let (request, generation) = {
-            let mut s = lock(&self.inner.state);
+            let mut s = mutex(&self.inner.state);
             let Some(job) = s.jobs.get_mut(&id) else {
                 return;
             };
@@ -716,7 +733,7 @@ impl Agora {
             run.await;
             agora.runner_ended(id, generation);
         });
-        if let Some(job) = lock(&self.inner.state).jobs.get_mut(&id) {
+        if let Some(job) = mutex(&self.inner.state).jobs.get_mut(&id) {
             job.handle = Some(task.abort_handle());
         }
         self.bump();
@@ -724,7 +741,7 @@ impl Agora {
 
     fn runner_ended(&self, id: u64, generation: u64) {
         {
-            let mut s = lock(&self.inner.state);
+            let mut s = mutex(&self.inner.state);
             if let Some(job) = s.jobs.get_mut(&id) {
                 if job.generation == generation && job.status == Status::Running {
                     job.status = Status::Finished;
@@ -739,7 +756,7 @@ impl Agora {
     /// Job or it already ended.
     pub fn cancel(&self, id: u64) -> bool {
         {
-            let mut s = lock(&self.inner.state);
+            let mut s = mutex(&self.inner.state);
             let Some(job) = s.jobs.get_mut(&id) else {
                 return false;
             };
@@ -788,7 +805,7 @@ impl Agora {
         }
         let role = job_number(job)
             .and_then(|n| {
-                lock(&self.inner.state)
+                mutex(&self.inner.state)
                     .jobs
                     .get(&n)
                     .and_then(|j| j.request.role.clone())
@@ -811,7 +828,7 @@ impl Agora {
         if let Some(mcp) = &self.inner.mcp {
             mcp.review_pending(self).await;
         }
-        lock(&self.inner.state)
+        mutex(&self.inner.state)
             .decided
             .retain(|k, _| !(k.0.starts_with("skills/") || k.0.starts_with("mcp/")));
     }
@@ -831,7 +848,7 @@ impl Agora {
 
     async fn approvals_view(&self) -> Value {
         self.sync().await;
-        let items: Vec<(u64, Key, String, &'static str)> = lock(&self.inner.state)
+        let items: Vec<(u64, Key, String, &'static str)> = mutex(&self.inner.state)
             .approvals
             .values()
             .map(|a| (a.id, a.key.clone(), a.role.clone(), a.kind))
@@ -859,7 +876,7 @@ impl Agora {
     /// Answers one pending approval. Returns false if there is none with this id.
     pub async fn decide_approval(&self, id: u64, decision: ApprovalDecision) -> bool {
         let found = {
-            let mut s = lock(&self.inner.state);
+            let mut s = mutex(&self.inner.state);
             match s.approvals.remove(&id) {
                 Some(a) => {
                     s.decided.insert(a.key, decision);
@@ -879,7 +896,7 @@ impl Agora {
     pub async fn decide_role(&self, role: &str, decision: ApprovalDecision) -> usize {
         self.sync().await;
         let n = {
-            let mut s = lock(&self.inner.state);
+            let mut s = mutex(&self.inner.state);
             let ids: Vec<u64> = s
                 .approvals
                 .values()
@@ -901,7 +918,7 @@ impl Agora {
     async fn after_decisions(&self) {
         self.sync().await;
         let paused: Vec<u64> = {
-            let s = lock(&self.inner.state);
+            let s = mutex(&self.inner.state);
             s.decided
                 .keys()
                 .filter_map(|k| job_number(&k.0))
@@ -948,7 +965,7 @@ impl Agora {
 
     /// The last reason a notification failed to send, if any did.
     pub fn last_notification_error(&self) -> Option<String> {
-        lock(&self.inner.notes).last_error.clone()
+        mutex(&self.inner.notes).last_error.clone()
     }
 
     /// Asks the Skill and MCP libraries about everything pending, so new ones are
@@ -966,7 +983,7 @@ impl Agora {
             return;
         };
         {
-            let mut notes = lock(&self.inner.notes);
+            let mut notes = mutex(&self.inner.notes);
             notes.batch.push(id);
             if notes.scheduled {
                 return;
@@ -982,13 +999,13 @@ impl Agora {
 
     async fn flush_notifications(&self) {
         let ids = {
-            let mut notes = lock(&self.inner.notes);
+            let mut notes = mutex(&self.inner.notes);
             notes.scheduled = false;
             std::mem::take(&mut notes.batch)
         };
         // Skip what was answered or cancelled while the window was open.
         let waiting: Vec<(u64, &'static str, String, String)> = {
-            let s = lock(&self.inner.state);
+            let s = mutex(&self.inner.state);
             ids.iter()
                 .filter_map(|id| s.approvals.get(id))
                 .map(|a| (a.id, a.kind, a.role.clone(), a.key.2.clone()))
@@ -1000,7 +1017,7 @@ impl Agora {
         let notification = self.compose(&waiting);
         for notifier in &self.inner.notifiers {
             if let Err(e) = notifier.send(&notification).await {
-                lock(&self.inner.notes).last_error = Some(e.to_string());
+                mutex(&self.inner.notes).last_error = Some(e.to_string());
             }
         }
     }
@@ -1041,7 +1058,7 @@ impl Approver for Agora {
         let (role, kind) = self.classify(request);
         let mut new_approval = None;
         let decision = {
-            let mut s = lock(&self.inner.state);
+            let mut s = mutex(&self.inner.state);
             if let Some(d) = s.decided.remove(&key) {
                 d
             } else {
@@ -1129,7 +1146,7 @@ async fn submit_job(
 }
 
 async fn list_jobs(State(agora): State<Agora>) -> Json<Value> {
-    let s = lock(&agora.inner.state);
+    let s = mutex(&agora.inner.state);
     Json(Value::Array(
         s.jobs
             .iter()
@@ -1139,7 +1156,7 @@ async fn list_jobs(State(agora): State<Agora>) -> Json<Value> {
 }
 
 async fn get_job(State(agora): State<Agora>, Path(id): Path<u64>) -> Result<Json<Value>, ApiError> {
-    let s = lock(&agora.inner.state);
+    let s = mutex(&agora.inner.state);
     let job = s.jobs.get(&id).ok_or_else(|| not_found("Job"))?;
     Ok(Json(job_view(id, job, &agora.inner.meter)))
 }
@@ -1148,14 +1165,14 @@ async fn cancel_job(
     State(agora): State<Agora>,
     Path(id): Path<u64>,
 ) -> Result<Json<Value>, ApiError> {
-    if !lock(&agora.inner.state).jobs.contains_key(&id) {
+    if !mutex(&agora.inner.state).jobs.contains_key(&id) {
         return Err(not_found("Job"));
     }
     Ok(Json(json!({"cancelled": agora.cancel(id)})))
 }
 
 async fn job_events(State(agora): State<Agora>, Path(id): Path<u64>) -> Result<Response, ApiError> {
-    if !lock(&agora.inner.state).jobs.contains_key(&id) {
+    if !mutex(&agora.inner.state).jobs.contains_key(&id) {
         return Err(not_found("Job"));
     }
     let rx = agora.inner.changed.subscribe();
@@ -1164,7 +1181,7 @@ async fn job_events(State(agora): State<Agora>, Path(id): Path<u64>) -> Result<R
         move |(agora, mut rx, idx)| async move {
             loop {
                 let next = {
-                    let s = lock(&agora.inner.state);
+                    let s = mutex(&agora.inner.state);
                     let job = s.jobs.get(&id)?;
                     match job.events.get(idx) {
                         Some(u) => Some(Some(u.clone())),
@@ -1241,10 +1258,12 @@ async fn usage(State(agora): State<Agora>) -> Json<Value> {
         .iter()
         .map(|n| usage_json(("name", json!(n)), meter.agent_usage(n)))
         .collect();
-    let jobs: Vec<Value> = lock(&agora.inner.state)
+    let jobs: Vec<Value> = mutex(&agora.inner.state)
         .jobs
         .keys()
         .map(|id| usage_json(("id", json!(id)), meter.job_usage(&job_name(*id))))
         .collect();
     Json(json!({"agents": agents, "jobs": jobs}))
 }
+
+
