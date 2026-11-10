@@ -318,3 +318,33 @@ impl<S: Send + 'static> GraphBuilder<S> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hire_gets_capped_default() {
+        let roster = Roster::new();
+        roster.add_role(Role::new("Writer", "Be brief"));
+        let agent = roster.hire("Writer", "Nova").expect("hire");
+        assert_eq!(agent.budget_tokens(), Some(DEFAULT_ROLE_BUDGET_TOKENS));
+        assert_eq!(DEFAULT_ROLE_BUDGET_TOKENS, 100_000);
+    }
+
+    #[test]
+    fn hire_with_explicit_budget_keeps_it() {
+        let roster = Roster::new();
+        roster.add_role(Role::new("Writer", "Be brief").budget_tokens(500));
+        let agent = roster.hire("Writer", "Nova").unwrap();
+        assert_eq!(agent.budget_tokens(), Some(500));
+    }
+
+    #[test]
+    fn explicit_unlimited_requires_opt_in() {
+        let roster = Roster::new();
+        roster.add_role(Role::new("Writer", "Be brief").without_budget_limit());
+        let agent = roster.hire("Writer", "Nova").unwrap();
+        assert_eq!(agent.budget_tokens(), None);
+    }
+}

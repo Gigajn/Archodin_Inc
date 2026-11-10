@@ -377,3 +377,291 @@ impl<S: Send + 'static> GraphBuilder<S> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Runs an async block on a throwaway current-thread runtime.
+    /// (`tokio::test` is unavailable: the `macros` feature of tokio is not
+    /// enabled for this crate.)
+    fn run_blocking<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(f)
+    }
+
+    fn over_budget_meter() -> UsageMeter {
+        let meter = UsageMeter::new();
+        meter.set_agent_budget("Lumen", Budget::tokens(100));
+        meter.record("job-1", "Lumen", Usage::new(0, 150, 0.0));
+        meter
+    }
+
+    #[test]
+    fn waiver_is_single_use() {
+        let meter = over_budget_meter();
+        assert_eq!(
+            meter.exceeded("job-1", "Lumen"),
+            Some(BudgetScope::Agent("Lumen".into()))
+        );
+        meter.approve_overrun(BudgetScope::Agent("Lumen".into()), "tester");
+        assert_eq!(meter.exceeded("job-1", "Lumen"), None);
+        let reservation = meter
+            .reserve("job-1", "Lumen", Usage::new(0, 10, 0.0))
+            .expect("the first over-budget reserve uses the waiver");
+        reservation.settle(Usage::new(0, 10, 0.0));
+        assert_eq!(
+            meter.exceeded("job-1", "Lumen"),
+            Some(BudgetScope::Agent("Lumen".into()))
+        );
+        assert!(meter
+            .reserve("job-1", "Lumen", Usage::new(0, 10, 0.0))
+            .is_err());
+    }
+
+    #[test]
+    fn waiver_expires() {
+        let meter = over_budget_meter();
+        meter.approve_overrun_with_ttl(
+            BudgetScope::Agent("Lumen".into()),
+            "tester",
+            Duration::from_secs(0),
+        );
+        assert_eq!(
+            meter.exceeded("job-1", "Lumen"),
+            Some(BudgetScope::Agent("Lumen".into()))
+        );
+        assert!(meter
+            .reserve("job-1", "Lumen", Usage::new(0, 10, 0.0))
+            .is_err());
+        meter.approve_overrun_with_ttl(
+            BudgetScope::Agent("Lumen".into()),
+            "tester",
+            Duration::from_secs(3600),
+        );
+        assert_eq!(meter.exceeded("job-1", "Lumen"), None);
+        assert!(meter
+            .reserve("job-1", "Lumen", Usage::new(0, 10, 0.0))
+            .is_ok());
+    }
+
+    #[test]
+    fn concurrent_reserves_cannot_collectively_exceed_budget() {
+        use std::sync::Barrier;
+        let meter = Arc::new(UsageMeter::new());
+        meter.set_agent_budget("Lumen", Budget::tokens(100));
+        // 8 workers + the main thread meet at all three barriers.
+        let start = Arc::new(Barrier::new(9));
+        let reserved = Arc::new(Barrier::new(9));
+        let checked = Arc::new(Barrier::new(9));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let meter = meter.clone();
+                let start = start.clone();
+                let reserved = reserved.clone();
+                let checked = checked.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    let guard = meter.reserve("job-1", "Lumen", Usage::new(0, 60, 0.0)).ok();
+                    let succeeded = guard.is_some();
+                    // Hold the reservation until the main thread has checked
+                    // the total, then drop it (refund) and report.
+                    reserved.wait();
+                    checked.wait();
+                    drop(guard);
+                    succeeded
+                })
+            })
+            .collect();
+        start.wait();
+        // Every worker has reserved (or failed) by the time this returns.
+        reserved.wait();
+        assert_eq!(meter.agent_usage("Lumen").total_tokens(), 60);
+        checked.wait();
+        let succeeded = handles
+            .into_iter()
+            .map(|h| h.join().expect("worker thread"))
+            .filter(|s| *s)
+            .count();
+        assert_eq!(
+            succeeded, 1,
+            "exactly one 60-token reserve fits in a 100-token budget"
+        );
+        assert_eq!(meter.agent_usage("Lumen").total_tokens(), 0);
+    }
+
+    #[test]
+    fn pricing_rejects_nan_negative_and_infinite() {
+        assert!(Pricing::per_million(f64::NAN, 1.0).is_err());
+        assert!(Pricing::per_million(1.0, f64::NAN).is_err());
+        assert!(Pricing::per_million(-1.0, 1.0).is_err());
+        assert!(Pricing::per_million(1.0, -1.0).is_err());
+        assert!(Pricing::per_million(f64::INFINITY, 1.0).is_err());
+        assert!(Pricing::per_million(1.0, f64::NEG_INFINITY).is_err());
+        assert!(Pricing::per_million(0.0, 0.0).is_ok());
+        assert!(Pricing::per_million(2.0, 4.0).is_ok());
+    }
+
+    #[test]
+    fn budget_cost_rejects_invalid() {
+        assert!(Budget::cost(f64::NAN).is_err());
+        assert!(Budget::cost(-1.0).is_err());
+        assert!(Budget::cost(f64::INFINITY).is_err());
+        assert!(Budget::cost(0.0).is_ok());
+        assert!(Budget::tokens(100).with_cost(f64::NAN).is_err());
+        assert!(Budget::tokens(100).with_cost(10.0).is_ok());
+    }
+
+    #[test]
+    fn record_rejects_nan_and_negative() {
+        let meter = UsageMeter::new();
+        meter.record("job-1", "Lumen", Usage::new(10, 10, f64::NAN));
+        meter.record("job-1", "Lumen", Usage::new(10, 10, -1.0));
+        meter.record("job-1", "Lumen", Usage::new(10, 10, f64::INFINITY));
+        assert_eq!(meter.job_usage("job-1"), Usage::default());
+        meter.record("job-1", "Lumen", Usage::new(10, 10, 0.5));
+        assert_eq!(meter.job_usage("job-1").total_tokens(), 20);
+        assert!((meter.job_usage("job-1").cost - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn exceeded_by_is_fail_closed_on_nan() {
+        let budget = Budget::cost(10.0).unwrap();
+        assert!(budget.exceeded_by(&Usage::new(0, 0, f64::NAN)));
+        let nan_budget = Budget {
+            max_tokens: None,
+            max_cost: Some(f64::NAN),
+        };
+        assert!(nan_budget.exceeded_by(&Usage::new(0, 0, 1.0)));
+        assert!(!budget.exceeded_by(&Usage::new(0, 0, 1.0)));
+    }
+
+    #[test]
+    fn settle_arithmetic_refund_and_top_up() {
+        let meter = UsageMeter::new();
+        meter.set_job_budget("job-1", Budget::tokens(1_000_000));
+        let reservation = meter
+            .reserve("job-1", "Lumen", Usage::new(40, 20, 1.0))
+            .unwrap();
+        reservation.settle(Usage::new(30, 10, 0.5));
+        let used = meter.job_usage("job-1");
+        assert_eq!(used.total_tokens(), 40);
+        assert!((used.cost - 0.5).abs() < 1e-9);
+        assert_eq!(meter.agent_usage("Lumen"), used);
+        let reservation = meter
+            .reserve("job-1", "Lumen", Usage::new(40, 20, 1.0))
+            .unwrap();
+        reservation.settle(Usage::new(70, 30, 2.0));
+        let used = meter.job_usage("job-1");
+        assert_eq!(used.total_tokens(), 140);
+        assert!((used.cost - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reservation_drop_refunds_estimate() {
+        let meter = UsageMeter::new();
+        {
+            let _reservation = meter
+                .reserve("job-1", "Lumen", Usage::new(40, 20, 1.0))
+                .unwrap();
+            assert_eq!(meter.job_usage("job-1").total_tokens(), 60);
+            assert_eq!(meter.agent_usage("Lumen").total_tokens(), 60);
+        }
+        assert_eq!(meter.job_usage("job-1"), Usage::default());
+        assert_eq!(meter.agent_usage("Lumen"), Usage::default());
+    }
+
+    #[test]
+    fn reserve_failure_does_not_consume_waiver() {
+        let meter = over_budget_meter();
+        meter.approve_overrun(BudgetScope::Agent("Lumen".into()), "tester");
+        assert!(meter
+            .reserve("job-1", "Lumen", Usage::new(0, 10, f64::NAN))
+            .is_err());
+        assert_eq!(
+            meter
+                .waiver_approver(&BudgetScope::Agent("Lumen".into()))
+                .as_deref(),
+            Some("tester")
+        );
+        let reservation = meter
+            .reserve("job-1", "Lumen", Usage::new(0, 10, 0.0))
+            .expect("the waiver survives the failed reserve");
+        reservation.settle(Usage::new(0, 10, 0.0));
+        assert!(meter
+            .reserve("job-1", "Lumen", Usage::new(0, 10, 0.0))
+            .is_err());
+    }
+
+    #[test]
+    fn exceeded_check_is_read_only() {
+        let meter = over_budget_meter();
+        meter.approve_overrun(BudgetScope::Agent("Lumen".into()), "tester");
+        assert_eq!(meter.exceeded("job-1", "Lumen"), None);
+        assert_eq!(meter.exceeded("job-1", "Lumen"), None);
+        assert_eq!(meter.exceeded("job-1", "Lumen"), None);
+        assert!(meter
+            .reserve("job-1", "Lumen", Usage::new(0, 10, 0.0))
+            .is_ok());
+    }
+
+    #[test]
+    fn approve_overrun_records_approver() {
+        let meter = Arc::new(UsageMeter::new());
+        meter.set_job_budget("job-1", Budget::tokens(100));
+        meter.record("job-1", "Lumen", Usage::new(0, 150, 0.0));
+        meter.register_node("polish", "Lumen");
+        let approver = BudgetApprover::with_approver(
+            meter.clone(),
+            ScriptedApprover::new([ApprovalDecision::Approved]),
+            "alice",
+        );
+        let request = ApprovalRequest {
+            job: "job-1".into(),
+            node: "polish".into(),
+            prompt: "Approve?".into(),
+        };
+        let decision = run_blocking(approver.decide(&request));
+        assert_eq!(decision, ApprovalDecision::Approved);
+        assert_eq!(
+            meter
+                .waiver_approver(&BudgetScope::Job("job-1".into()))
+                .as_deref(),
+            Some("alice")
+        );
+        // The default constructor records an explicit anonymous identity.
+        let meter2 = Arc::new(UsageMeter::new());
+        meter2.set_job_budget("job-1", Budget::tokens(100));
+        meter2.record("job-1", "Lumen", Usage::new(0, 150, 0.0));
+        meter2.register_node("polish", "Lumen");
+        let anon = BudgetApprover::new(
+            meter2.clone(),
+            ScriptedApprover::new([ApprovalDecision::Approved]),
+        );
+        let decision = run_blocking(anon.decide(&request));
+        assert_eq!(decision, ApprovalDecision::Approved);
+        assert_eq!(
+            meter2
+                .waiver_approver(&BudgetScope::Job("job-1".into()))
+                .as_deref(),
+            Some("anonymous")
+        );
+    }
+
+    #[test]
+    fn settle_with_invalid_actual_keeps_estimate() {
+        let meter = UsageMeter::new();
+        let reservation = meter
+            .reserve("job-1", "Lumen", Usage::new(40, 20, 1.0))
+            .unwrap();
+        reservation.settle(Usage::new(0, 0, f64::NAN));
+        let used = meter.job_usage("job-1");
+        assert_eq!(used.total_tokens(), 60);
+        assert!((used.cost - 1.0).abs() < 1e-9);
+    }
+}
