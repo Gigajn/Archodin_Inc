@@ -8,8 +8,9 @@
 //! across Roles. A Skill's scripts stay disabled until approved separately.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
+use crate::locks::mutex;
 use crate::{Agent, ApprovalDecision, ApprovalRequest, Approver};
 
 /// Whether a Skill is started on purpose or reached for by itself.
@@ -248,10 +249,6 @@ struct Inner {
     owned: BTreeMap<(String, String), Entry>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 fn job(role: &str) -> String {
     format!("skills/{role}")
 }
@@ -288,7 +285,7 @@ impl SkillLibrary {
         summary: Option<String>,
         unverified: bool,
     ) {
-        lock(&self.inner).pending.push(PendingSkill {
+        mutex(&self.inner).pending.push(PendingSkill {
             role: role.into(),
             skill,
             summary,
@@ -298,7 +295,7 @@ impl SkillLibrary {
 
     /// The Skills waiting for approval, oldest first.
     pub fn pending(&self) -> Vec<PendingSkill> {
-        lock(&self.inner).pending.clone()
+        mutex(&self.inner).pending.clone()
     }
 
     /// Asks `approver` about every pending Skill. Approved ones become the
@@ -316,7 +313,7 @@ impl SkillLibrary {
                 ),
             };
             let decision = approver.decide(&request).await;
-            let mut inner = lock(&self.inner);
+            let mut inner = mutex(&self.inner);
             if decision == ApprovalDecision::Pending {
                 continue;
             }
@@ -348,7 +345,7 @@ impl SkillLibrary {
         approver: &dyn Approver,
     ) -> Result<ApprovalDecision, SkillError> {
         let number = {
-            let inner = lock(&self.inner);
+            let inner = mutex(&self.inner);
             let entry = Self::entry(&inner, role, skill)?;
             entry.versions[entry.active].number
         };
@@ -359,7 +356,7 @@ impl SkillLibrary {
         };
         let decision = approver.decide(&request).await;
         if decision == ApprovalDecision::Approved {
-            let mut inner = lock(&self.inner);
+            let mut inner = mutex(&self.inner);
             if let Some(entry) = inner.owned.get_mut(&(role.to_string(), skill.to_string())) {
                 if let Some(v) = entry.versions.iter_mut().find(|v| v.number == number) {
                     v.scripts_approved = true;
@@ -377,7 +374,7 @@ impl SkillLibrary {
         skill: &str,
         script: &str,
     ) -> Result<String, SkillError> {
-        let inner = lock(&self.inner);
+        let inner = mutex(&self.inner);
         let entry = Self::entry(&inner, role, skill)?;
         let v = &entry.versions[entry.active];
         if !v.scripts_approved {
@@ -408,7 +405,7 @@ impl SkillLibrary {
     }
 
     fn set_shared(&self, role: &str, skill: &str, shared: bool) -> Result<(), SkillError> {
-        let mut inner = lock(&self.inner);
+        let mut inner = mutex(&self.inner);
         let entry = inner
             .owned
             .get_mut(&(role.to_string(), skill.to_string()))
@@ -419,7 +416,7 @@ impl SkillLibrary {
 
     /// Goes back to the version before the active one.
     pub fn rollback(&self, role: &str, skill: &str) -> Result<(), SkillError> {
-        let mut inner = lock(&self.inner);
+        let mut inner = mutex(&self.inner);
         let entry = inner
             .owned
             .get_mut(&(role.to_string(), skill.to_string()))
@@ -433,7 +430,7 @@ impl SkillLibrary {
 
     /// The version numbers kept for the Role's Skill, oldest first.
     pub fn versions(&self, role: &str, skill: &str) -> Vec<u32> {
-        let inner = lock(&self.inner);
+        let inner = mutex(&self.inner);
         Self::entry(&inner, role, skill)
             .map(|e| e.versions.iter().map(|v| v.number).collect())
             .unwrap_or_default()
@@ -442,7 +439,7 @@ impl SkillLibrary {
     /// The approved Skills a Role can use: its own, then those other Roles share
     /// (the Role's own Skill wins when names clash).
     pub fn skills_for_role(&self, role: &str) -> Vec<Skill> {
-        let inner = lock(&self.inner);
+        let inner = mutex(&self.inner);
         let mut out: Vec<Skill> = Vec::new();
         let active = |e: &Entry| e.versions[e.active].skill.clone();
         for ((r, _), e) in &inner.owned {
@@ -519,7 +516,7 @@ pub struct SkillSnapshot {
 impl SkillLibrary {
     /// Copies everything the library holds, for a storage backend to keep.
     pub fn snapshot(&self) -> SkillSnapshot {
-        let inner = lock(&self.inner);
+        let inner = mutex(&self.inner);
         SkillSnapshot {
             pending: inner.pending.clone(),
             owned: inner
@@ -604,3 +601,4 @@ impl FlowRun {
         Ok(skill.clone())
     }
 }
+
