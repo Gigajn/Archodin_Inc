@@ -149,9 +149,12 @@ pub enum JobUpdate {
     JobRejected { node: String, state: String },
     /// The Job hit its Step limit.
     StepLimitReached { limit: usize, state: String },
-    /// The Job failed with an error that could not be recovered. One general
-    /// failure variant: both `JobEvent::JobFailed` and (later, KR-04)
-    /// `JobEvent::CheckpointFailed` map here via `error.to_string()`.
+    /// The Job failed with an error that could not be recovered. This is
+    /// the one failure variant for Job-level errors: both
+    /// `JobEvent::JobFailed` (a graph failure) and
+    /// `JobEvent::CheckpointFailed` (a store failure) map here via
+    /// `error.to_string()`, so the Agora never needs a new variant per
+    /// failure source.
     JobFailed { error: String },
     /// A person cancelled the Job.
     Cancelled,
@@ -195,6 +198,9 @@ impl JobUpdate {
                 limit: *limit,
                 state: format!("{state:?}"),
             },
+            JobEvent::CheckpointFailed { error } => Self::JobFailed {
+                error: error.to_string(),
+            },
             JobEvent::JobFailed { error } => Self::JobFailed {
                 error: error.to_string(),
             },
@@ -224,6 +230,12 @@ impl JobSink {
 }
 
 /// Sends every event of a Graph's stream to `sink`.
+///
+/// A `JobEvent::CheckpointFailed` arrives as a `JobUpdate::JobFailed` and
+/// marks the Job `Failed`, so a Job whose Checkpoint save fails after a
+/// `NodeStarted` still ends terminally — the `NodeStarted` simply never
+/// gets its matching `NodeFinished`. The pump tolerates that unpaired
+/// event: it forwards whatever the stream yields, in order.
 pub async fn pump<S: Debug>(mut events: impl Stream<Item = JobEvent<S>> + Unpin, sink: &JobSink) {
     while let Some(event) = events.next().await {
         sink.emit(JobUpdate::from_event(&event));
@@ -1070,3 +1082,4 @@ async fn usage(State(agora): State<Agora>) -> Json<Value> {
         .collect();
     Json(json!({"agents": agents, "jobs": jobs}))
 }
+
