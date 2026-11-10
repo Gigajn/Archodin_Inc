@@ -53,6 +53,12 @@ pub const MAX_SKILL_DESCRIPTION_LEN: usize = 512;
 pub const MAX_SKILL_BODY_LEN: usize = 65_536;
 /// The most Disciplines one Skill may list in `uses`.
 pub const MAX_SKILL_USES: usize = 32;
+/// The most scripts one Skill may carry, and the most script text in total.
+/// The body cap does not cover scripts, so without these bounds a Skill
+/// could carry unbounded script text that the static scan in `vigil.rs` must
+/// still read line by line; Vigil rejects a Skill past either bound.
+pub const MAX_SKILL_SCRIPTS: usize = 32;
+pub const MAX_SKILL_SCRIPT_TOTAL_LEN: usize = 65_536;
 
 /// Whether `name` is a valid Skill name: 1-64 chars, starting with a lowercase
 /// letter, ending with a lowercase letter or digit, and only lowercase letters,
@@ -170,6 +176,8 @@ impl Skill {
     }
 
     /// Adds a script to the Skill; it stays disabled until separately approved.
+    /// Vigil rejects a Skill with more than `MAX_SKILL_SCRIPTS` scripts, or
+    /// more than `MAX_SKILL_SCRIPT_TOTAL_LEN` bytes of script text in total.
     pub fn script(mut self, name: impl Into<String>, source: impl Into<String>) -> Self {
         self.scripts.insert(name.into(), source.into());
         self
