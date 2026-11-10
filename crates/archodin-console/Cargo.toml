@@ -2,7 +2,7 @@
 name = "archodin-console"
 version = "0.1.0"
 edition = "2021"
-license = "LicenseRef-Proprietary"
+license = "MIT"
 publish = false
 description = "The Agora: Archodin's web console for submitting Jobs, following them and approving"
 

@@ -2,7 +2,7 @@
 name = "archodin-store"
 version = "0.1.0"
 edition = "2021"
-license = "LicenseRef-Proprietary"
+license = "MIT"
 publish = false
 description = "Archodin persistent storage: SQLite and Postgres behind the in-memory store interfaces"
 

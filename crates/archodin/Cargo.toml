@@ -2,7 +2,7 @@
 name = "archodin"
 version = "0.1.0"
 edition = "2021"
-license = "LicenseRef-Proprietary"
+license = "MIT"
 publish = false
 description = "Archodin: multi-agent library for an AI-staffed company, built on langchain-rust"
 
