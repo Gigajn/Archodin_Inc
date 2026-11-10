@@ -492,6 +492,7 @@ pub use sandbox::{
     run_skill_script, ContainerSandbox, Limit, Sandbox, SandboxError, SandboxInput, SandboxOutput,
     SandboxPolicy, SandboxTool, ScriptedSandbox, SkillScriptError,
 };
+mod http_guard;
 mod mcp;
 pub use mcp::{McpClient, McpError, McpLibrary, McpServer, PendingMcpServer};
 mod ronin;
@@ -506,5 +507,3 @@ pub use upgrade::{
 };
 mod forja;
 pub use forja::{Forja, ForjaError, ForjaGitHub, ForjaPullRequest, ForjaWork};
-
-
