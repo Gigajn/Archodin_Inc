@@ -29,6 +29,10 @@ pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
 }
 
+fn invalid(e: impl std::fmt::Display) -> StoreError {
+    StoreError::Invalid(e.to_string())
+}
+
 impl MemoryStore {
     /// An empty store.
     pub fn new() -> Self {
@@ -40,18 +44,19 @@ impl<S> CheckpointStore<S> for MemoryStore
 where
     S: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, ()> {
-        let state = serde_json::to_string(&checkpoint.state)
-            .expect("a Checkpoint State must serialize to JSON");
-        mutex(&self.inner)
-            .checkpoints
-            .entry(checkpoint.job)
-            .or_default()
-            .push((checkpoint.step, state, checkpoint.next));
-        Box::pin(async {})
+    fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, Result<(), StoreError>> {
+        Box::pin(async move {
+            let state = serde_json::to_string(&checkpoint.state).map_err(invalid)?;
+            mutex(&self.inner)
+                .checkpoints
+                .entry(checkpoint.job)
+                .or_default()
+                .push((checkpoint.step, state, checkpoint.next));
+            Ok(())
+        })
     }
 
-    fn checkpoints(&self, job: &str) -> BoxFuture<'_, Vec<Checkpoint<S>>> {
+    fn checkpoints(&self, job: &str) -> BoxFuture<'_, Result<Vec<Checkpoint<S>>, StoreError>> {
         let job = job.to_string();
         let rows = mutex(&self.inner)
             .checkpoints
@@ -60,14 +65,16 @@ where
             .unwrap_or_default();
         Box::pin(async move {
             rows.into_iter()
-                .map(|(step, state, next)| Checkpoint {
-                    job: job.clone(),
-                    step,
-                    state: serde_json::from_str(&state)
-                        .expect("a stored Checkpoint State must deserialize"),
-                    next,
+                .map(|(step, state, next)| {
+                    let state: S = serde_json::from_str(&state).map_err(invalid)?;
+                    Ok(Checkpoint {
+                        job: job.clone(),
+                        step,
+                        state,
+                        next,
+                    })
                 })
-                .collect()
+                .collect::<Result<Vec<Checkpoint<S>>, StoreError>>()
         })
     }
 }
@@ -147,3 +154,4 @@ impl AkashaStore for MemoryStore {
         Ok(mutex(&self.inner).facts.keys().cloned().collect())
     }
 }
+
