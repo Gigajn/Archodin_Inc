@@ -387,6 +387,7 @@ mod tests {
         let mut empty: Vec<Message> = Vec::new();
         prune_history(&mut empty);
         assert!(empty.is_empty());
+    }
 
     #[test]
     fn hire_gets_capped_default() {
@@ -414,4 +415,3 @@ mod tests {
 
     }
 }
-
