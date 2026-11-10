@@ -21,10 +21,7 @@ use crate::{
     ApprovalDecision, ApprovalRequest, Approver, Budget, Department, Explorador, Nakama, Proposal,
     Roster, UsageMeter, Workload,
 };
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+use crate::locks::mutex;
 
 /// One version of a Department's setup.
 #[derive(Debug, Clone, PartialEq)]
@@ -114,17 +111,17 @@ impl VersionedDepartment {
 
     /// The version new Jobs use.
     pub fn version(&self) -> u32 {
-        lock(&self.versions).current().version
+        mutex(&self.versions).current().version
     }
 
     /// The setup new Jobs use.
     pub fn setup(&self) -> DepartmentSetup {
-        lock(&self.versions).current().setup.clone()
+        mutex(&self.versions).current().setup.clone()
     }
 
     /// Every version ever made, rolled-back ones included, oldest first.
     pub fn history(&self) -> Vec<(u32, DepartmentSetup)> {
-        lock(&self.versions)
+        mutex(&self.versions)
             .all
             .iter()
             .map(|e| (e.version, e.setup.clone()))
@@ -134,7 +131,7 @@ impl VersionedDepartment {
     /// Starts a Job on the current version. The Job keeps that version even if
     /// the Department is upgraded or rolled back while it runs.
     pub fn start_job(&self) -> RunningJob {
-        let versions = lock(&self.versions);
+        let versions = mutex(&self.versions);
         let current = versions.current();
         RunningJob {
             version: current.version,
@@ -145,7 +142,7 @@ impl VersionedDepartment {
     /// Makes the previous version current again for new Jobs, registering its
     /// Budget on `meter`, and returns it. Running Jobs are not affected.
     pub fn rollback(&self, meter: &UsageMeter) -> Result<u32, UpgradeError> {
-        let mut versions = lock(&self.versions);
+        let mut versions = mutex(&self.versions);
         if versions.active.len() < 2 {
             return Err(UpgradeError::NothingToRollBack);
         }
@@ -308,7 +305,7 @@ impl Explorador {
         upgrade: Upgrade,
     ) -> UpgradeCharter {
         let (from_version, from) = {
-            let versions = lock(&department.versions);
+            let versions = mutex(&department.versions);
             let current = versions.current();
             (current.version, current.setup.clone())
         };
@@ -385,7 +382,7 @@ impl Explorador {
             }
         }
         meter.set_agent_budget(&department.department.budget_key(), charter.setup.budget);
-        let mut versions = lock(&department.versions);
+        let mut versions = mutex(&department.versions);
         let version = versions.all.last().map_or(1, |e| e.version) + 1;
         versions.all.push(Entry {
             version,
