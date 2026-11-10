@@ -13,8 +13,14 @@
 //! Checkpoints are stored through the graph's own
 //! [`CheckpointStore`](archodin_graph::CheckpointStore) trait, so a durable Job
 //! runs against a [`SqlStore`] exactly as it does against the in-memory store.
-//! That trait cannot report errors, so a backend failure while saving or
-//! reading a Checkpoint panics rather than silently losing the Job's progress.
+//! Since KR-04, that trait reports errors: a backend failure while saving or
+//! reading a Checkpoint ends the durable Job with a terminal
+//! `JobEvent::CheckpointFailed` event instead of panicking.
+//!
+//! # Breaking change (KR-04)
+//! `CheckpointStore::save` and `CheckpointStore::checkpoints` now return
+//! `Result<_, StoreError>`. All implementers and callers were updated; see
+//! `archodin-graph/src/durable.rs`.
 //! Roles, Agents, Skills and the Akasha go through [`RosterStore`],
 //! [`SkillStore`] and [`AkashaStore`], with the helpers [`save_roster`] /
 //! [`restore_roster`], [`save_library`] / [`load_library`] and
@@ -23,8 +29,13 @@
 //! What is code is not stored: a Role's Tools and Model chain (which holds API
 //! keys) are given back by the caller in [`restore_roster`].
 
-use archodin_graph::{Akasha, Role, Roster, RosterError, SkillLibrary, SkillSnapshot};
+use archodin_graph::{Akasha, Role, Roster, SkillLibrary, SkillSnapshot};
 use async_trait::async_trait;
+
+// `StoreError` lives in `archodin-graph` (so the `CheckpointStore` trait can
+// name it without a dependency cycle); this crate re-exports it so existing
+// `archodin_store::StoreError` paths keep working.
+pub use archodin_graph::StoreError;
 
 mod memory;
 pub use memory::MemoryStore;
@@ -33,20 +44,6 @@ pub use memory::MemoryStore;
 mod sql;
 #[cfg(feature = "sql")]
 pub use sql::SqlStore;
-
-/// Why a storage operation failed.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum StoreError {
-    /// The database failed or could not be reached.
-    #[error("storage backend failed: {0}")]
-    Backend(String),
-    /// Stored data could not be read back.
-    #[error("stored data is invalid: {0}")]
-    Invalid(String),
-    /// Stored Roles and Agents do not fit together.
-    #[error(transparent)]
-    Roster(#[from] RosterError),
-}
 
 /// A Role as it is stored: its instructions, Skills slot and Budget.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -6,6 +6,21 @@
 //! [`Approver`] (the interface the Agora will implement) before it runs: the Job
 //! pauses while the answer is [`ApprovalDecision::Pending`], continues on
 //! approve and stops on reject.
+//!
+//! # Breaking change (KR-04)
+//!
+//! `CheckpointStore::save` and `CheckpointStore::checkpoints` return
+//! `Result<_, StoreError>` instead of `()` / `Vec<Checkpoint<S>>`.
+//! A store that cannot serialize, persist, or read a Checkpoint reports
+//! the failure to its caller; it never panics. Callers must handle the
+//! `Err` case: a failed Checkpoint ends the durable Job stream with a
+//! terminal [`JobEvent::CheckpointFailed`] event, and
+//! [`Graph::run_job`] returns [`GraphError::CheckpointFailed`].
+//!
+//! When the save after a Node fails, the stream ends with
+//! `CheckpointFailed` instead of `NodeFinished`: consumers may see a
+//! `NodeStarted` without its matching `NodeFinished`. The Job is over
+//! either way — the event is terminal.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -13,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 
-use crate::{Edge, Graph, GraphBuilder, GraphError, JobEvent, RunOptions, END};
+use crate::{Edge, Graph, GraphBuilder, GraphError, JobEvent, RunOptions, StoreError, END};
 
 /// A saved copy of the State after a step.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,9 +46,17 @@ pub struct Checkpoint<S> {
 /// Where Checkpoints are kept.
 pub trait CheckpointStore<S>: Send + Sync {
     /// Appends a Checkpoint for its Job.
-    fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, ()>;
+    ///
+    /// Fails (instead of panicking) when the Checkpoint cannot be
+    /// serialized or persisted.
+    fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, Result<(), StoreError>>;
     /// All Checkpoints of a Job, oldest first.
-    fn checkpoints(&self, job: &str) -> BoxFuture<'_, Vec<Checkpoint<S>>>;
+    ///
+    /// Fails (instead of panicking) when the stored rows cannot be read
+    /// or a stored Checkpoint no longer deserializes. One corrupt row
+    /// fails the whole call (fail-closed): the Job cannot resume until
+    /// the corrupt row is removed by hand.
+    fn checkpoints(&self, job: &str) -> BoxFuture<'_, Result<Vec<Checkpoint<S>>, StoreError>>;
 }
 
 /// A [`CheckpointStore`] held in memory.
@@ -57,25 +80,28 @@ impl<S> Default for InMemoryCheckpointStore<S> {
 }
 
 impl<S: Clone + Send + 'static> CheckpointStore<S> for InMemoryCheckpointStore<S> {
-    fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, ()> {
+    fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, Result<(), StoreError>> {
+        // A poisoned lock is recovered (the repo's established pattern:
+        // `unwrap_or_else(|e| e.into_inner())`); the in-memory store has
+        // no other failure mode, so it always reports `Ok`.
         self.saved
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .entry(checkpoint.job.clone())
             .or_default()
             .push(checkpoint);
-        Box::pin(async {})
+        Box::pin(async { Ok(()) })
     }
 
-    fn checkpoints(&self, job: &str) -> BoxFuture<'_, Vec<Checkpoint<S>>> {
+    fn checkpoints(&self, job: &str) -> BoxFuture<'_, Result<Vec<Checkpoint<S>>, StoreError>> {
         let found = self
             .saved
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(job)
             .cloned()
             .unwrap_or_default();
-        Box::pin(async move { found })
+        Box::pin(async move { Ok(found) })
     }
 }
 
@@ -227,17 +253,28 @@ impl<S: Clone + Send + 'static> Graph<S> {
             async move {
                 match phase {
                     Phase::Begin(initial) => {
-                        let latest = store.checkpoints(&job).await.pop();
+                        let latest = match store.checkpoints(&job).await {
+                            Ok(cps) => cps.pop(),
+                            Err(error) => {
+                                return Some((JobEvent::CheckpointFailed { error }, Phase::Done));
+                            }
+                        };
                         let next = match latest {
                             None => {
-                                store
+                                if let Err(error) = store
                                     .save(Checkpoint {
                                         job: job.clone(),
                                         step: 0,
                                         state: initial.clone(),
                                         next: Some(self.inner.entry.clone()),
                                     })
-                                    .await;
+                                    .await
+                                {
+                                    return Some((
+                                        JobEvent::CheckpointFailed { error },
+                                        Phase::Done,
+                                    ));
+                                }
                                 Phase::At {
                                     state: initial,
                                     node: self.inner.entry.clone(),
@@ -294,14 +331,17 @@ impl<S: Clone + Send + 'static> Graph<S> {
                     Phase::Run { state, node, step } => {
                         let updated = (self.inner.nodes[&node])(state).await;
                         let next = self.next_after(&node, &updated);
-                        store
+                        if let Err(error) = store
                             .save(Checkpoint {
                                 job: job.clone(),
                                 step: step + 1,
                                 state: updated.clone(),
                                 next: next.clone(),
                             })
-                            .await;
+                            .await
+                        {
+                            return Some((JobEvent::CheckpointFailed { error }, Phase::Done));
+                        }
                         let phase = match next {
                             Some(n) => Phase::At {
                                 state: updated,
@@ -363,7 +403,18 @@ impl<S: Clone + Send + 'static> Graph<S> {
                 JobEvent::JobRejected { node, state } => {
                     return Ok(JobOutcome::Rejected { node, state })
                 }
-                _ => {}
+                JobEvent::CheckpointFailed { error } => {
+                    return Err(GraphError::CheckpointFailed(error))
+                }
+                // Any other event is progress, not an ending: keep consuming
+                // the stream. This list is explicit on purpose — a new
+                // terminal variant must get its own arm here instead of
+                // being swallowed silently (KR-04, K-06).
+                JobEvent::JobStarted
+                | JobEvent::NodeStarted { .. }
+                | JobEvent::NodeFinished { .. }
+                | JobEvent::Conflict { .. }
+                | JobEvent::Decision { .. } => {}
             }
         }
         unreachable!("a durable Job stream always ends with a closing event")
