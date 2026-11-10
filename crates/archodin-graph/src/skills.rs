@@ -48,6 +48,33 @@ pub enum SkillError {
     UnknownScript(String),
 }
 
+/// The longest a Skill name, description, or body may be.
+pub const MAX_SKILL_NAME_LEN: usize = 64;
+pub const MAX_SKILL_DESCRIPTION_LEN: usize = 512;
+pub const MAX_SKILL_BODY_LEN: usize = 65_536;
+/// The most Disciplines one Skill may list in `uses`.
+pub const MAX_SKILL_USES: usize = 32;
+/// The most scripts one Skill may carry, and the most script text in total.
+/// The body cap does not cover scripts, so without these bounds a Skill
+/// could carry unbounded script text that the static scan in `vigil.rs` must
+/// still read line by line; Vigil rejects a Skill past either bound.
+pub const MAX_SKILL_SCRIPTS: usize = 32;
+pub const MAX_SKILL_SCRIPT_TOTAL_LEN: usize = 65_536;
+
+/// Whether `name` is a valid Skill name: 1-64 chars, starting with a lowercase
+/// letter, ending with a lowercase letter or digit, and only lowercase letters,
+/// digits, and `-` in between.
+fn valid_skill_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= MAX_SKILL_NAME_LEN
+        && bytes[0].is_ascii_lowercase()
+        && (bytes[bytes.len() - 1].is_ascii_lowercase() || bytes[bytes.len() - 1].is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
 /// Procedural knowledge written as a `SKILL.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
@@ -103,6 +130,23 @@ impl Skill {
         let name = name
             .filter(|n| !n.is_empty())
             .ok_or_else(|| bad("missing name"))?;
+        if !valid_skill_name(&name) {
+            return Err(bad(&format!(
+                "invalid name `{name}`: use 1-{MAX_SKILL_NAME_LEN} lowercase letters, digits, and `-`, starting with a letter"
+            )));
+        }
+        if description.len() > MAX_SKILL_DESCRIPTION_LEN {
+            return Err(bad("description is too long"));
+        }
+        if uses.len() > MAX_SKILL_USES {
+            return Err(bad("too many `uses` entries"));
+        }
+        if let Some(other) = uses.iter().find(|u| !valid_skill_name(u)) {
+            return Err(bad(&format!("invalid skill name `{other}` in `uses`")));
+        }
+        if body.len() > MAX_SKILL_BODY_LEN {
+            return Err(bad("body is too long"));
+        }
         Ok(Self {
             name,
             description,
@@ -133,6 +177,8 @@ impl Skill {
     }
 
     /// Adds a script to the Skill; it stays disabled until separately approved.
+    /// Vigil rejects a Skill with more than `MAX_SKILL_SCRIPTS` scripts, or
+    /// more than `MAX_SKILL_SCRIPT_TOTAL_LEN` bytes of script text in total.
     pub fn script(mut self, name: impl Into<String>, source: impl Into<String>) -> Self {
         self.scripts.insert(name.into(), source.into());
         self
@@ -222,8 +268,12 @@ impl SkillLibrary {
     }
 
     /// Holds a new or changed Skill for `role` until a person approves it.
+    ///
+    /// Nothing has inspected this Skill, so it is recorded as unverified with no
+    /// Vigil summary. A Skill that passed inspection belongs here through
+    /// Vigil::submit or `propose_inspected` instead.
     pub fn propose(&self, role: &str, skill: Skill) {
-        self.propose_inspected(role, skill, None, false);
+        self.propose_inspected(role, skill, None, true);
     }
 
     /// Holds a Skill Vigil has inspected, with Vigil's `summary` attached, until a
@@ -551,3 +601,4 @@ impl FlowRun {
         Ok(skill.clone())
     }
 }
+
