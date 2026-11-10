@@ -2,14 +2,14 @@
 name = "archodin-store"
 version = "0.1.0"
 edition = "2021"
-license = "LicenseRef-Proprietary"
+license = "MIT"
 publish = false
 description = "Archodin persistent storage: SQLite and Postgres behind the in-memory store interfaces"
 
 [features]
 default = ["sqlite"]
 # A single machine: one SQLite file.
-sqlite = ["sql", "sqlx/sqlite"]
+sqlite = ["dep:sqlx"]
 # A server: Postgres.
 postgres = ["sql", "sqlx/postgres", "sqlx/tls-native-tls"]
 sql = ["dep:sqlx"]
