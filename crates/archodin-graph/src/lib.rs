@@ -424,7 +424,17 @@ impl<S: Clone + Send + 'static> Graph<S> {
                     return Err(GraphError::StepLimitReached { limit })
                 }
                 JobEvent::JobFailed { error } => return Err(error),
-                _ => {}
+                // Every other event is progress, not an outcome: list them
+                // explicitly (no wildcard) so the compiler forces a future
+                // failure variant -- e.g. KR-04's `CheckpointFailed` -- to
+                // be handled here instead of silently ending the stream.
+                JobEvent::JobStarted
+                | JobEvent::NodeStarted { .. }
+                | JobEvent::NodeFinished { .. }
+                | JobEvent::Conflict { .. }
+                | JobEvent::Decision { .. }
+                | JobEvent::JobPaused { .. }
+                | JobEvent::JobRejected { .. } => {}
             }
         }
         Err(GraphError::StreamEnded)

@@ -149,6 +149,10 @@ pub enum JobUpdate {
     JobRejected { node: String, state: String },
     /// The Job hit its Step limit.
     StepLimitReached { limit: usize, state: String },
+    /// The Job failed with an error that could not be recovered. One general
+    /// failure variant: both `JobEvent::JobFailed` and (later, KR-04)
+    /// `JobEvent::CheckpointFailed` map here via `error.to_string()`.
+    JobFailed { error: String },
     /// A person cancelled the Job.
     Cancelled,
     /// An answer arrived and the Job continues.
@@ -190,6 +194,9 @@ impl JobUpdate {
             JobEvent::StepLimitReached { limit, state } => Self::StepLimitReached {
                 limit: *limit,
                 state: format!("{state:?}"),
+            },
+            JobEvent::JobFailed { error } => Self::JobFailed {
+                error: error.to_string(),
             },
         }
     }
@@ -472,6 +479,7 @@ impl Agora {
                 JobUpdate::JobPaused { .. } => job.status = Status::Paused,
                 JobUpdate::JobRejected { .. } => job.status = Status::Rejected,
                 JobUpdate::StepLimitReached { .. } => job.status = Status::Failed,
+                JobUpdate::JobFailed { .. } => job.status = Status::Failed,
                 _ => {}
             }
             job.events.push(update);

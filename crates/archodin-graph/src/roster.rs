@@ -346,6 +346,9 @@ mod tests {
             .collect();
         prune_history(&mut history);
         assert_eq!(history.len(), MAX_HISTORY_MESSAGES);
+        // The 100 kept are the newest: "turn 0".."turn 2" were dropped.
+        assert_eq!(history.first().unwrap().content, "turn 3");
+        assert_eq!(history.last().unwrap().content, "turn 102");
     }
 
     #[test]

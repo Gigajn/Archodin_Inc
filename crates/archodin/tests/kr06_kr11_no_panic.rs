@@ -157,10 +157,14 @@ fn completion(content: &str) -> String {
 #[tokio::test]
 async fn an_agent_conversation_stops_growing_at_100_messages() {
     let mut server = Server::new_async().await;
-    server
+    // 61 asks in total below (60 + 1 after the cap): the mock must serve
+    // all of them -- mockito's default expectation is 1 request, after
+    // which it answers 501 and the test would panic on `.unwrap()`.
+    let mock = server
         .mock("POST", "/chat/completions")
         .with_header("content-type", "application/json")
         .with_body(completion("ok"))
+        .expect(61)
         .create_async()
         .await;
     let roster = Roster::new();
@@ -179,6 +183,7 @@ async fn an_agent_conversation_stops_growing_at_100_messages() {
     // The agent still answers after the cap, and the history stays capped.
     assert_eq!(nova.ask("still there?").await.unwrap(), "ok");
     assert_eq!(nova.history_len(), 100);
+    mock.assert_async().await;
 }
 
 // The stream counterpart of the resume test above: a durable Job that ends

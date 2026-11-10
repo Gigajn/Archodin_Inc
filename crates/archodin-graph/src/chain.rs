@@ -110,7 +110,14 @@ impl ModelChain {
         report: Option<&Arc<dyn Fn(ChainEvent) + Send + Sync>>,
     ) -> Result<GenerateResult, AgentError> {
         loop {
-            let provider = &self.pairs[*current];
+            // `current` only advances while a next pair exists, so this is
+            // unreachable in practice; an out-of-range index is a caller
+            // bug, reported as an error rather than a panic.
+            let Some(provider) = self.pairs.get(*current) else {
+                return Err(AgentError::Provider(
+                    "the Model chain has no pair at the current index".into(),
+                ));
+            };
             let outcome = match provider.llm(tools) {
                 Err(text) => Err(FallbackReason::Error(provider.redact(text))),
                 Ok(llm) => {

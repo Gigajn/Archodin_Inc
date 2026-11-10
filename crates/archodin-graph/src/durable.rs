@@ -374,7 +374,14 @@ impl<S: Clone + Send + 'static> Graph<S> {
                     return Ok(JobOutcome::Rejected { node, state })
                 }
                 JobEvent::JobFailed { error } => return Err(error),
-                _ => {}
+                // As in `Graph::run_with`: no wildcard, so a future failure
+                // variant (KR-04's `CheckpointFailed`) must be handled here
+                // explicitly instead of silently ending the stream.
+                JobEvent::JobStarted
+                | JobEvent::NodeStarted { .. }
+                | JobEvent::NodeFinished { .. }
+                | JobEvent::Conflict { .. }
+                | JobEvent::Decision { .. } => {}
             }
         }
         Err(GraphError::StreamEnded)
