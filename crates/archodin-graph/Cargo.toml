@@ -11,6 +11,19 @@ langchain-rust = { path = "../.." }
 futures = "0.3.31"
 tokio = { version = "1", features = ["time", "rt", "process", "io-util", "sync"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "stream"] }
+# SSRF filtering at resolve time (ADR 0010): http-acl supplies the ACL and
+# the filtering DNS resolver wired into `http_guard::shared_client()`.
+# Both crates declare reqwest with default-features = false and no TLS
+# feature, so they add no second TLS stack.
+http-acl = "0.14.0"
+http-acl-reqwest = "0.14.0"
+# The official MCP SDK, replacing the hand-rolled JSON-RPC client in mcp.rs
+# (ADR 0009). Minimal features: `client` + Streamable HTTP over the shared
+# reqwest client + stdio child processes. `reqwest-native-tls` — not the
+# default rustls — so there is still only one TLS stack in the workspace.
+# No `auth` (no OAuth) and no `elicitation`.
+rmcp = { version = "3.9.0", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "transport-child-process", "reqwest-native-tls"] }
+octocrab = { version = "=0.54.9", default-features = false, features = ["reqwest"] }
 thiserror = "2.0.17"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

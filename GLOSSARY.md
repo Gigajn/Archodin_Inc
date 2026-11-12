@@ -133,3 +133,29 @@ _Avoid_: Inspector, auditor, scanner
 **Codex**:
 The Agent that keeps the Skill library and the Akasha: it holds Skills waiting for approval, installs approved ones, keeps their versions for rollback, and marks Skills shared across Roles.
 _Avoid_: Curator, librarian, registry
+
+## Egress
+
+**Egress**:
+Anything that leaves the machine: outbound HTTP requests made by Ronin, the MCP client, or a model Provider. All egress goes through one guarded client, so the rules for what may leave are written in exactly one place.
+_Avoid_: Outbound, external calls
+
+**Egress policy**:
+The rules for egress, owned by `http_guard`: which URLs may be fetched, which IP ranges are forbidden, how many redirects are followed, the body cap (2 MiB) and the timeout (30 s). A dependency may enforce part of the policy (http-acl enforces the IP part at resolve time), but it never defines the policy.
+_Avoid_: Firewall rules, network config
+
+**SSRF**:
+Server-Side Request Forgery: an attack where a URL from untrusted data (a search result, a Skill file, a model answer) makes the server request an internal service — a cloud metadata address, localhost, or another machine on the private network — and read the answer.
+_Avoid_: Request forgery
+
+**DNS rebinding**:
+An SSRF variant where a hostname resolves to a public IP when it is checked, and to a private IP when the connection is made. It is closed only if validation and connection use the same resolution, or if the connection is pinned to the validated IP.
+_Avoid_: DNS attack, rebinding
+
+**DNS pinning**:
+Binding a connection to the IP address that was already validated, so no second DNS lookup happens between validation and connection. Filter-in-resolver (an ACL applied inside the resolver, so reqwest dials only an already-checked address) closes the same hole in the standard reqwest path, but the guarantee then rests on reqwest dialling exactly what the resolver returned.
+_Avoid_: DNS caching, pinning
+
+**Guarded client**:
+The one shared `reqwest::Client` built by `http_guard::shared_client()`, with every guard wired in: the http-acl DNS resolver, the redirect policy, the timeout, and no proxy. No other place in the codebase may build an egress client.
+_Avoid_: HTTP client, shared client

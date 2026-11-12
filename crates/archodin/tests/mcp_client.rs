@@ -12,6 +12,10 @@ const FAKE_STDIO: &str = r#"
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
+    *'"server/discover"'*)
+      # A legacy server: it does not know discovery, so the client falls
+      # back to the `initialize` handshake.
+      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"Method not found"}}\n' "$id";;
     *'"initialize"'*)
       printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}}\n' "$id";;
     *'"tools/list"'*)
@@ -61,6 +65,19 @@ fn rpc_body(id: u64, result: Value) -> String {
 #[tokio::test]
 async fn http_server_tools_work_over_json_and_event_streams() {
     let mut server = Server::new_async().await;
+    // A legacy server: `server/discover` is unknown, so the client falls
+    // back to the `initialize` handshake. rmcp numbers requests from 0,
+    // so discovery is id 0 and the old fixed ids below still line up.
+    let discover = server
+        .mock("POST", "/mcp")
+        .match_body(Matcher::PartialJson(json!({"method":"server/discover"})))
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"Method not found"}})
+                .to_string(),
+        )
+        .create_async()
+        .await;
     let init = server
         .mock("POST", "/mcp")
         .match_body(Matcher::PartialJson(json!({"method":"initialize"})))
@@ -113,7 +130,7 @@ async fn http_server_tools_work_over_json_and_event_streams() {
     let tools = client.tools().await.unwrap();
     assert_eq!(tools[0].name(), "add");
     assert_eq!(tools[0].call(r#"{"a":1}"#).await.unwrap(), "sum");
-    for m in [init, initialized, list, call] {
+    for m in [discover, init, initialized, list, call] {
         m.assert_async().await;
     }
 }

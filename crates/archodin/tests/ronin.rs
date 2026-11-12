@@ -208,7 +208,10 @@ async fn github_search_needs_no_login_and_skips_code_search() {
         .match_header("user-agent", Matcher::Any)
         .with_header("content-type", "application/json")
         .with_body(
-            json!({"items": [{"full_name": "acme/sql-skill", "description": "SQL"}]}).to_string(),
+            json!({"items": [{"id": 1, "name": "sql-skill",
+                "url": format!("{}/repos/acme/sql-skill", gh.url()),
+                "full_name": "acme/sql-skill", "description": "SQL"}]})
+            .to_string(),
         )
         .expect(1)
         .create_async()
@@ -219,17 +222,31 @@ async fn github_search_needs_no_login_and_skips_code_search() {
         .expect(0)
         .create_async()
         .await;
+    // The contents endpoint now answers with the typed GitHub contents
+    // object (base64 body), the shape octocrab's `get_content` parses.
     let file = gh
         .mock("GET", "/repos/acme/sql-skill/contents/SKILL.md")
-        .match_header("accept", "application/vnd.github.raw+json")
+        .match_query(Matcher::Any)
         .match_header("authorization", Matcher::Missing)
-        .with_body(SQL_SKILL)
+        .with_body(
+            json!({"type": "file", "encoding": "base64", "size": 66,
+                "name": "SKILL.md", "path": "SKILL.md",
+                "content": "LS0tCm5hbWU6IHNxbApkZXNjcmlwdGlvbjogUXVlcnkgZGF0YWJhc2VzCi0tLQpXcml0ZSBjYXJlZnVsIFNRTC4K",
+                "sha": "abc",
+                "url": format!("{}/repos/acme/sql-skill/contents/SKILL.md", gh.url()),
+                "git_url": format!("{}/repos/acme/sql-skill/git/blobs/abc", gh.url()),
+                "html_url": "https://github.com/acme/sql-skill/blob/main/SKILL.md",
+                "download_url": format!("{}/acme/sql-skill/raw/SKILL.md", gh.url()),
+                "_links": {"self": format!("{}/repos/acme/sql-skill/contents/SKILL.md", gh.url())}})
+            .to_string(),
+        )
         .expect(1)
         .create_async()
         .await;
     let models = fake_models(&[("Vigil", "PASS: ok"), ("Ronin", "sql")]).await;
     let library = SkillLibrary::new();
-    let ronin = ronin_with(&models, &library).search(GitHubSearch::new(gh.url()));
+    let ronin = ronin_with(&models, &library)
+        .search(GitHubSearch::new(gh.url()).expect("a mock URL is a valid endpoint"));
     let report = ronin.scout("analyst", "query").await.unwrap();
     assert_eq!(report.found.len(), 1);
     repos.assert_async().await;
@@ -255,8 +272,12 @@ async fn a_configured_github_token_is_used_and_enables_code_search() {
         .match_query(Matcher::Regex("SKILL.md".into()))
         .with_header("content-type", "application/json")
         .with_body(
-            json!({"items": [{"name": "SKILL.md", "html_url": "https://github.com/a/b/blob/main/SKILL.md",
-                "url": format!("{}/repos/a/b/contents/SKILL.md", gh.url())}]})
+            json!({"items": [{"name": "SKILL.md", "path": "SKILL.md", "sha": "abc",
+                "url": format!("{}/repos/a/b/contents/SKILL.md", gh.url()),
+                "git_url": format!("{}/repos/a/b/git/blobs/abc", gh.url()),
+                "html_url": "https://github.com/a/b/blob/main/SKILL.md",
+                "repository": {"id": 2, "name": "b",
+                    "url": format!("{}/repos/a/b", gh.url()), "full_name": "a/b"}}]})
             .to_string(),
         )
         .expect(1)
@@ -264,14 +285,30 @@ async fn a_configured_github_token_is_used_and_enables_code_search() {
         .await;
     let file = gh
         .mock("GET", "/repos/a/b/contents/SKILL.md")
+        .match_query(Matcher::Any)
         .match_header("authorization", "Bearer tok-1")
-        .with_body(SQL_SKILL)
+        .with_body(
+            json!({"type": "file", "encoding": "base64", "size": 66,
+                "name": "SKILL.md", "path": "SKILL.md",
+                "content": "LS0tCm5hbWU6IHNxbApkZXNjcmlwdGlvbjogUXVlcnkgZGF0YWJhc2VzCi0tLQpXcml0ZSBjYXJlZnVsIFNRTC4K",
+                "sha": "abc",
+                "url": format!("{}/repos/a/b/contents/SKILL.md", gh.url()),
+                "git_url": format!("{}/repos/a/b/git/blobs/abc", gh.url()),
+                "html_url": "https://github.com/a/b/blob/main/SKILL.md",
+                "download_url": format!("{}/a/b/raw/SKILL.md", gh.url()),
+                "_links": {"self": format!("{}/repos/a/b/contents/SKILL.md", gh.url())}})
+            .to_string(),
+        )
         .expect(1)
         .create_async()
         .await;
     let models = fake_models(&[("Vigil", "PASS: ok"), ("Ronin", "sql")]).await;
     let library = SkillLibrary::new();
-    let ronin = ronin_with(&models, &library).search(GitHubSearch::new(gh.url()).token("tok-1"));
+    let ronin = ronin_with(&models, &library).search(
+        GitHubSearch::new(gh.url())
+            .expect("a mock URL is a valid endpoint")
+            .token("tok-1"),
+    );
     let report = ronin.scout("analyst", "query").await.unwrap();
     assert_eq!(report.found.len(), 1);
     repos.assert_async().await;
