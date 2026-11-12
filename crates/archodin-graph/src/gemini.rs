@@ -14,6 +14,10 @@ use langchain_rust::language_models::{
 use langchain_rust::schemas::{Message, MessageType, StreamData, ToolCall};
 use serde_json::{json, Map, Value};
 
+use crate::http_guard::{
+    read_capped, shared_client, text_capped, validate_endpoint, MAX_RESPONSE_BYTES,
+};
+
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 
 /// Google's Gemini models through the Generative Language API.
@@ -48,12 +52,38 @@ impl Gemini {
         self
     }
 
-    fn url(&self, method: &str) -> String {
-        format!("{}/v1beta/models/{}:{method}", self.base_url, self.model)
+    /// The request URL for `method`. The model name is interpolated into the
+    /// path, so it may only contain the characters a model name needs —
+    /// anything else (`/`, `?`, `#`, …) is refused instead of letting the
+    /// name escape into another path or query. The base URL is operator
+    /// configuration (a proxy or a fake server), so it goes through the
+    /// operator check, not the strict one.
+    fn url(&self, method: &str) -> Result<String, LLMError> {
+        if self.model.is_empty()
+            || !self
+                .model
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        {
+            return Err(LLMError::OtherError(format!(
+                "Gemini model name {:?} has characters a model name cannot have",
+                self.model
+            )));
+        }
+        let url = format!("{}/v1beta/models/{}:{method}", self.base_url, self.model);
+        validate_endpoint(&url)
+            .map_err(|e| LLMError::OtherError(format!("Gemini URL refused: {e}")))?;
+        Ok(url)
     }
 
+    /// Sends one request with the shared client (KR-01): 30 s total timeout,
+    /// at most 5 redirects to allowed targets, and the error body is read
+    /// capped at 2 MiB instead of unbounded.
     async fn send(&self, url: &str, messages: &[Message]) -> Result<reqwest::Response, LLMError> {
-        let response = reqwest::Client::new()
+        validate_endpoint(url)
+            .map_err(|e| LLMError::OtherError(format!("Gemini URL refused: {e}")))?;
+        let response = shared_client()
+            .map_err(|e| LLMError::OtherError(format!("could not build HTTP client: {e}")))?
             .post(url)
             .header("x-goog-api-key", &self.api_key)
             .json(&self.payload(messages))
@@ -63,7 +93,10 @@ impl Gemini {
         if status.is_success() {
             return Ok(response);
         }
-        let body = response.text().await.unwrap_or_default();
+        let body = read_capped(response)
+            .await
+            .map_err(|e| LLMError::OtherError(format!("Gemini error body: {e}")))?;
+        let body = text_capped(body);
         let message = serde_json::from_str::<Value>(&body)
             .ok()
             .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
@@ -300,14 +333,24 @@ impl Answer {
 }
 
 /// The JSON objects of the `data:` lines of a server-sent event stream.
+/// The stream is capped at [`MAX_RESPONSE_BYTES`] in total: a server that
+/// never stops sending no longer grows the buffer without bound.
 fn sse_chunks(
     response: reqwest::Response,
 ) -> impl Stream<Item = Result<Value, LLMError>> + Send + 'static {
     async_stream::try_stream! {
         let mut bytes = response.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
+        let mut total: usize = 0;
         while let Some(chunk) = bytes.next().await {
-            buffer.extend_from_slice(&chunk?);
+            let chunk = chunk?;
+            total = total.saturating_add(chunk.len());
+            if total > MAX_RESPONSE_BYTES {
+                Err::<(), _>(LLMError::OtherError(format!(
+                    "Gemini stream exceeded the {MAX_RESPONSE_BYTES} byte limit"
+                )))?;
+            }
+            buffer.extend_from_slice(&chunk);
             while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
                 let line: Vec<u8> = buffer.drain(..=end).collect();
                 if let Some(value) = data_line(&line)? {
@@ -336,8 +379,13 @@ fn data_line(line: &[u8]) -> Result<Option<Value>, LLMError> {
 #[async_trait]
 impl LLM for Gemini {
     async fn generate(&self, messages: &[Message]) -> Result<GenerateResult, LLMError> {
-        let response = self.send(&self.url("generateContent"), messages).await?;
-        let value: Value = response.json().await?;
+        let response = self.send(&self.url("generateContent")?, messages).await?;
+        // Read capped (2 MiB) instead of `response.json()`, which reads
+        // without a limit.
+        let body = read_capped(response)
+            .await
+            .map_err(|e| LLMError::OtherError(e.to_string()))?;
+        let value: Value = serde_json::from_slice(&body)?;
         let mut answer = Answer::default();
         answer.add(parse_piece(&value)?);
         Ok(answer.finish())
@@ -347,7 +395,7 @@ impl LLM for Gemini {
         &self,
         messages: &[Message],
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamData, LLMError>> + Send>>, LLMError> {
-        let url = format!("{}?alt=sse", self.url("streamGenerateContent"));
+        let url = format!("{}?alt=sse", self.url("streamGenerateContent")?);
         let response = self.send(&url, messages).await?;
         let stream = sse_chunks(response).map(|chunk| {
             let chunk = chunk?;
@@ -359,7 +407,10 @@ impl LLM for Gemini {
 
     fn generate_stream<'a>(&'a self, messages: &'a [Message]) -> LLMEventStream<'a> {
         Box::pin(async_stream::try_stream! {
-            let url = format!("{}?alt=sse", self.url("streamGenerateContent"));
+            // `?` cannot live inside `format!(...)` here: hoist it out so the
+            // error converts into the stream's error like the `?` below does.
+            let base = self.url("streamGenerateContent")?;
+            let url = format!("{base}?alt=sse");
             let response = self.send(&url, messages).await?;
             let chunks = sse_chunks(response);
             futures::pin_mut!(chunks);
@@ -377,5 +428,71 @@ impl LLM for Gemini {
 
     fn add_options(&mut self, options: CallOptions) {
         self.options.merge_options(options)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            // A current-thread runtime with no special settings always builds.
+            .expect("a test runtime always builds")
+            .block_on(future)
+    }
+
+    fn other_error(err: LLMError) -> String {
+        match err {
+            LLMError::OtherError(message) => message,
+            other => panic!("expected an OtherError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_names_are_limited_to_the_characters_a_name_needs() {
+        let good = Gemini::new("key", "gemini-2.5-flash")
+            .url("generateContent")
+            .expect("a plain model name builds a URL");
+        assert_eq!(
+            good,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        );
+        for bad in ["../evil", "a/b", "a?b=c", "a#b", "a b", "a@b", "a:b", "", "a%b"] {
+            let err = Gemini::new("key", bad).url("generateContent");
+            assert!(err.is_err(), "model name {bad:?} must be refused");
+        }
+    }
+
+    /// A refused base URL or model name fails in `generate` before any
+    /// request is sent — so these tests need no network.
+    #[test]
+    fn generate_refuses_bad_urls_before_any_request() {
+        let messages: &[Message] = &[];
+        for llm in [
+            Gemini::new("key", "../evil"),
+            Gemini::new("key", "gemini-2.5-flash").with_base_url("file:///etc/passwd"),
+            Gemini::new("key", "gemini-2.5-flash")
+                .with_base_url("https://user:pass@example.com"),
+            Gemini::new("key", "gemini-2.5-flash").with_base_url("not a url"),
+        ] {
+            let err = block_on(llm.generate(messages));
+            assert!(err.is_err(), "the request must be refused, got {err:?}");
+        }
+        let message = other_error(
+            block_on(
+                Gemini::new("key", "gemini-2.5-flash")
+                    .with_base_url("file:///etc/passwd")
+                    .generate(messages),
+            )
+            .unwrap_err(),
+        );
+        assert!(
+            message.contains("refused"),
+            "the error must say the URL was refused, got {message:?}"
+        );
     }
 }

@@ -6,6 +6,21 @@
 //! [`Approver`] (the interface the Agora will implement) before it runs: the Job
 //! pauses while the answer is [`ApprovalDecision::Pending`], continues on
 //! approve and stops on reject.
+//!
+//! # Breaking change (KR-04)
+//!
+//! `CheckpointStore::save` and `CheckpointStore::checkpoints` return
+//! `Result<_, StoreError>` instead of `()` / `Vec<Checkpoint<S>>`.
+//! A store that cannot serialize, persist, or read a Checkpoint reports
+//! the failure to its caller; it never panics. Callers must handle the
+//! `Err` case: a failed Checkpoint ends the durable Job stream with a
+//! terminal [`JobEvent::CheckpointFailed`] event, and
+//! [`Graph::run_job`] returns [`GraphError::CheckpointFailed`].
+//!
+//! When the save after a Node fails, the stream ends with
+//! `CheckpointFailed` instead of `NodeFinished`: consumers may see a
+//! `NodeStarted` without its matching `NodeFinished`. The Job is over
+//! either way — the event is terminal.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -13,7 +28,8 @@ use std::sync::{Arc, Mutex};
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 
-use crate::{Edge, Graph, GraphBuilder, GraphError, JobEvent, RunOptions, END};
+use crate::locks::mutex;
+use crate::{Edge, Graph, GraphBuilder, GraphError, JobEvent, RunOptions, StoreError, END};
 
 /// A saved copy of the State after a step.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,9 +47,17 @@ pub struct Checkpoint<S> {
 /// Where Checkpoints are kept.
 pub trait CheckpointStore<S>: Send + Sync {
     /// Appends a Checkpoint for its Job.
-    fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, ()>;
+    ///
+    /// Fails (instead of panicking) when the Checkpoint cannot be
+    /// serialized or persisted.
+    fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, Result<(), StoreError>>;
     /// All Checkpoints of a Job, oldest first.
-    fn checkpoints(&self, job: &str) -> BoxFuture<'_, Vec<Checkpoint<S>>>;
+    ///
+    /// Fails (instead of panicking) when the stored rows cannot be read
+    /// or a stored Checkpoint no longer deserializes. One corrupt row
+    /// fails the whole call (fail-closed): the Job cannot resume until
+    /// the corrupt row is removed by hand.
+    fn checkpoints(&self, job: &str) -> BoxFuture<'_, Result<Vec<Checkpoint<S>>, StoreError>>;
 }
 
 /// A [`CheckpointStore`] held in memory.
@@ -57,25 +81,23 @@ impl<S> Default for InMemoryCheckpointStore<S> {
 }
 
 impl<S: Clone + Send + 'static> CheckpointStore<S> for InMemoryCheckpointStore<S> {
-    fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, ()> {
-        self.saved
-            .lock()
-            .unwrap()
+    fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, Result<(), StoreError>> {
+        // A poisoned lock is recovered by `locks::mutex` (KR-11); the
+        // in-memory store has no other failure mode, so it always
+        // reports `Ok`.
+        mutex(&self.saved)
             .entry(checkpoint.job.clone())
             .or_default()
             .push(checkpoint);
-        Box::pin(async {})
+        Box::pin(async { Ok(()) })
     }
 
-    fn checkpoints(&self, job: &str) -> BoxFuture<'_, Vec<Checkpoint<S>>> {
-        let found = self
-            .saved
-            .lock()
-            .unwrap()
+    fn checkpoints(&self, job: &str) -> BoxFuture<'_, Result<Vec<Checkpoint<S>>, StoreError>> {
+        let found = mutex(&self.saved)
             .get(job)
             .cloned()
             .unwrap_or_default();
-        Box::pin(async move { found })
+        Box::pin(async move { Ok(found) })
     }
 }
 
@@ -125,17 +147,14 @@ impl ScriptedApprover {
 
     /// Every request received so far.
     pub fn requests(&self) -> Vec<ApprovalRequest> {
-        self.asked.lock().unwrap().clone()
+        mutex(&self.asked).clone()
     }
 }
 
 impl Approver for ScriptedApprover {
     fn decide(&self, request: &ApprovalRequest) -> BoxFuture<'_, ApprovalDecision> {
-        self.asked.lock().unwrap().push(request.clone());
-        let decision = self
-            .script
-            .lock()
-            .unwrap()
+        mutex(&self.asked).push(request.clone());
+        let decision = mutex(&self.script)
             .pop_front()
             .unwrap_or(ApprovalDecision::Pending);
         Box::pin(async move { decision })
@@ -181,21 +200,25 @@ enum Phase<S> {
 }
 
 impl<S: Clone + Send + 'static> Graph<S> {
-    /// The Node after `_node` given the State; `None` ends the Job.
-    fn next_after(&self, node: &str, state: &S) -> Option<String> {
+    /// The Node after `node` given the State; `None` ends the Job. A router
+    /// that returns a target outside its declared list fails the Job with
+    /// [`GraphError::UnknownConditionalTarget`] instead of panicking.
+    fn next_after(&self, node: &str, state: &S) -> Result<Option<String>, GraphError> {
         let next = match self.inner.edges.get(node) {
             None => END,
             Some(Edge::To(t)) => t.as_str(),
             Some(Edge::Conditional { router, targets }) => {
                 let chosen = router(state);
-                assert!(
-                    targets.iter().any(|t| t == chosen),
-                    "conditional edge from `{node}` returned undeclared target `{chosen}`"
-                );
+                if !targets.iter().any(|t| t == chosen) {
+                    return Err(GraphError::UnknownConditionalTarget {
+                        node: node.to_string(),
+                        target: chosen.to_string(),
+                    });
+                }
                 chosen
             }
         };
-        (next != END).then(|| next.to_string())
+        Ok((next != END).then(|| next.to_string()))
     }
 
     /// Streams a durable Job: Checkpoints are written as it goes, and an
@@ -227,17 +250,28 @@ impl<S: Clone + Send + 'static> Graph<S> {
             async move {
                 match phase {
                     Phase::Begin(initial) => {
-                        let latest = store.checkpoints(&job).await.pop();
+                        let latest = match store.checkpoints(&job).await {
+                            Ok(mut cps) => cps.pop(),
+                            Err(error) => {
+                                return Some((JobEvent::CheckpointFailed { error }, Phase::Done));
+                            }
+                        };
                         let next = match latest {
                             None => {
-                                store
+                                if let Err(error) = store
                                     .save(Checkpoint {
                                         job: job.clone(),
                                         step: 0,
                                         state: initial.clone(),
                                         next: Some(self.inner.entry.clone()),
                                     })
-                                    .await;
+                                    .await
+                                {
+                                    return Some((
+                                        JobEvent::CheckpointFailed { error },
+                                        Phase::Done,
+                                    ));
+                                }
                                 Phase::At {
                                     state: initial,
                                     node: self.inner.entry.clone(),
@@ -292,16 +326,32 @@ impl<S: Clone + Send + 'static> Graph<S> {
                         ))
                     }
                     Phase::Run { state, node, step } => {
-                        let updated = (self.inner.nodes[&node])(state).await;
-                        let next = self.next_after(&node, &updated);
-                        store
+                        let Some(node_fn) = self.inner.nodes.get(&node) else {
+                            return Some((
+                                JobEvent::JobFailed {
+                                    error: GraphError::UnknownEdgeNode(node.clone()),
+                                },
+                                Phase::Done,
+                            ));
+                        };
+                        let updated = node_fn(state).await;
+                        let next = match self.next_after(&node, &updated) {
+                            Ok(next) => next,
+                            Err(error) => {
+                                return Some((JobEvent::JobFailed { error }, Phase::Done));
+                            }
+                        };
+                        if let Err(error) = store
                             .save(Checkpoint {
                                 job: job.clone(),
                                 step: step + 1,
                                 state: updated.clone(),
                                 next: next.clone(),
                             })
-                            .await;
+                            .await
+                        {
+                            return Some((JobEvent::CheckpointFailed { error }, Phase::Done));
+                        }
                         let phase = match next {
                             Some(n) => Phase::At {
                                 state: updated,
@@ -363,9 +413,22 @@ impl<S: Clone + Send + 'static> Graph<S> {
                 JobEvent::JobRejected { node, state } => {
                     return Ok(JobOutcome::Rejected { node, state })
                 }
-                _ => {}
+                JobEvent::CheckpointFailed { error } => {
+                    return Err(GraphError::CheckpointFailed(error))
+                }
+                JobEvent::JobFailed { error } => return Err(error),
+                // Any other event is progress, not an ending: keep consuming
+                // the stream. This list is explicit on purpose — a new
+                // terminal variant must get its own arm here instead of
+                // being swallowed silently (KR-04, KR-06).
+                JobEvent::JobStarted
+                | JobEvent::NodeStarted { .. }
+                | JobEvent::NodeFinished { .. }
+                | JobEvent::Conflict { .. }
+                | JobEvent::Decision { .. } => {}
             }
         }
-        unreachable!("a durable Job stream always ends with a closing event")
+        Err(GraphError::StreamEnded)
     }
 }
+

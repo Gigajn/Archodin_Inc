@@ -50,7 +50,7 @@ async fn each_step_writes_a_checkpoint() {
         .await
         .unwrap();
     assert_eq!(outcome, JobOutcome::Finished(Tally { total: 11 }));
-    let saved: Vec<Checkpoint<Tally>> = store.checkpoints("job-1").await;
+    let saved: Vec<Checkpoint<Tally>> = store.checkpoints("job-1").await.unwrap();
     let states: Vec<_> = saved.iter().map(|c| (c.step, c.state.total)).collect();
     assert_eq!(states, vec![(0, 1), (1, 11)]);
     assert_eq!(saved[0].next.as_deref(), Some("add_ten"));
@@ -67,7 +67,7 @@ async fn an_interrupted_job_resumes_and_matches_an_uninterrupted_run() {
     events.next().await; // JobStarted
     events.next().await; // NodeStarted
     drop(events);
-    assert_eq!(store.checkpoints("job-1").await.len(), 1);
+    assert_eq!(store.checkpoints("job-1").await.unwrap().len(), 1);
 
     // "Restart": a fresh Graph over the same store; the initial State is ignored.
     let resumed = add_ten_graph()
@@ -183,5 +183,5 @@ async fn resume_follows_edges_and_the_step_limit_holds_across_resume() {
         .unwrap();
     let plain = chain_graph().run(Tally { total: 1 }).await.unwrap();
     assert_eq!(done, JobOutcome::Finished(plain));
-    assert_eq!(store.checkpoints("job-1").await.len(), 4);
+    assert_eq!(store.checkpoints("job-1").await.unwrap().len(), 4);
 }

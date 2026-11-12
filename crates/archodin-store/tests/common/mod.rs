@@ -95,7 +95,7 @@ pub async fn job_interrupted_by_restart_resumes_from_its_checkpoint<T: Company>(
 
     // The process restarts: a new storage handle, a new graph, a new approver.
     let store = open().await;
-    let saved = store.checkpoints("job-1").await;
+    let saved = store.checkpoints("job-1").await.unwrap();
     assert_eq!(saved.iter().map(|c| c.step).collect::<Vec<_>>(), vec![0, 1]);
     assert_eq!(saved[1].next.as_deref(), Some("second"));
     let done = graph(first_runs.clone())
@@ -113,10 +113,10 @@ pub async fn job_interrupted_by_restart_resumes_from_its_checkpoint<T: Company>(
         1,
         "the first step ran again"
     );
-    let all = store.checkpoints("job-1").await;
+    let all = store.checkpoints("job-1").await.unwrap();
     assert_eq!(all.len(), 3);
     assert_eq!(all[2].next, None);
-    assert!(store.checkpoints("other-job").await.is_empty());
+    assert!(store.checkpoints("other-job").await.unwrap().is_empty());
 }
 
 pub async fn agents_keep_names_roles_and_order_across_restarts<T: Company>(open: Open<T>) {
@@ -126,7 +126,7 @@ pub async fn agents_keep_names_roles_and_order_across_restarts<T: Company>(open:
             .skill("review")
             .budget_tokens(5000),
     );
-    roster.add_role(Role::new("Writer", "Write docs"));
+    roster.add_role(Role::new("Writer", "Write docs").without_budget_limit());
     roster.hire("Engineer", "Ada").unwrap();
     roster.hire("Writer", "Bo").unwrap();
     roster.hire("Engineer", "Cy").unwrap();

@@ -6,14 +6,20 @@
 //! one Job to the next, and an optional Model chain that overrides the Role's.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use futures::lock::Mutex as AsyncMutex;
 use langchain_rust::schemas::Message;
 
+use crate::locks::mutex;
 use crate::{AgentError, AgentNode, AgentTool, ChainEvent, GraphBuilder, ModelChain, Provider};
 
 /// A job description from which Agents are created.
+///
+/// Every Role carries a token Budget for its Agents. A Role built with
+/// [`Role::new`] gets [`DEFAULT_ROLE_BUDGET_TOKENS`]; call
+/// [`Role::budget_tokens`] for an explicit cap, or
+/// [`Role::without_budget_limit`] for the only way to opt out of the cap.
 #[derive(Clone)]
 pub struct Role {
     name: String,
@@ -24,8 +30,18 @@ pub struct Role {
     budget_tokens: Option<u64>,
 }
 
+/// The token Budget a Role's Agents get when the Role sets no explicit one:
+/// 100,000 tokens — roughly 66 large model steps (a step uses 60–1,500 tokens
+/// in the existing tests). Loose enough for normal Agents, still bounded, so
+/// `hire()` never creates an Agent that can spend without limit by accident.
+pub const DEFAULT_ROLE_BUDGET_TOKENS: u64 = 100_000;
+
 impl Role {
     /// A Role called `name` whose Agents follow `instructions`.
+    ///
+    /// The Role's Agents get a Budget of [`DEFAULT_ROLE_BUDGET_TOKENS`] tokens
+    /// unless the Role sets another one (see [`Role::budget_tokens`] and
+    /// [`Role::without_budget_limit`]).
     pub fn new(name: impl Into<String>, instructions: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -33,7 +49,7 @@ impl Role {
             tools: Vec::new(),
             skills: Vec::new(),
             model_chain: Vec::new(),
-            budget_tokens: None,
+            budget_tokens: Some(DEFAULT_ROLE_BUDGET_TOKENS),
         }
     }
 
@@ -61,6 +77,14 @@ impl Role {
         self
     }
 
+    /// Removes the Role's token Budget: Agents of this Role spend without a
+    /// token limit. This is the only way to get an unlimited Role — the
+    /// default is [`DEFAULT_ROLE_BUDGET_TOKENS`], never silent unlimited.
+    pub fn without_budget_limit(mut self) -> Self {
+        self.budget_tokens = None;
+        self
+    }
+
     /// The Role's name.
     pub fn name(&self) -> &str {
         &self.name
@@ -76,7 +100,9 @@ impl Role {
         &self.skills
     }
 
-    /// The Role's token Budget, if it has one.
+    /// The Role's token Budget, if it has one. `Some` by default (see
+    /// [`DEFAULT_ROLE_BUDGET_TOKENS`]); `None` only after
+    /// [`Role::without_budget_limit`].
     pub fn budget(&self) -> Option<u64> {
         self.budget_tokens
     }
@@ -108,10 +134,6 @@ pub struct Roster {
     inner: Arc<Mutex<RosterInner>>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 impl Roster {
     /// An empty Roster.
     pub fn new() -> Self {
@@ -120,12 +142,12 @@ impl Roster {
 
     /// Adds a Role, replacing any Role with the same name.
     pub fn add_role(&self, role: Role) {
-        lock(&self.inner).roles.insert(role.name.clone(), role);
+        mutex(&self.inner).roles.insert(role.name.clone(), role);
     }
 
     /// Creates an Agent called `name` from the Role called `role`.
     pub fn hire(&self, role: &str, name: &str) -> Result<Agent, RosterError> {
-        let mut inner = lock(&self.inner);
+        let mut inner = mutex(&self.inner);
         if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c == '/') {
             return Err(RosterError::InvalidName(name.into()));
         }
@@ -153,26 +175,26 @@ impl Roster {
 
     /// The Role called `name`, if there is one.
     pub fn role(&self, name: &str) -> Option<Role> {
-        lock(&self.inner).roles.get(name).cloned()
+        mutex(&self.inner).roles.get(name).cloned()
     }
 
     /// Every Role, ordered by name.
     pub fn roles(&self) -> Vec<Role> {
-        let mut roles: Vec<Role> = lock(&self.inner).roles.values().cloned().collect();
+        let mut roles: Vec<Role> = mutex(&self.inner).roles.values().cloned().collect();
         roles.sort_by(|a, b| a.name.cmp(&b.name));
         roles
     }
 
     /// Lets the Agent called `name` go, returning it if there was one.
     pub fn release(&self, name: &str) -> Option<Agent> {
-        let mut inner = lock(&self.inner);
+        let mut inner = mutex(&self.inner);
         let at = inner.agents.iter().position(|a| a.name() == name)?;
         Some(inner.agents.remove(at))
     }
 
     /// The Agent called `name`, if there is one.
     pub fn agent(&self, name: &str) -> Option<Agent> {
-        lock(&self.inner)
+        mutex(&self.inner)
             .agents
             .iter()
             .find(|a| a.name() == name)
@@ -181,7 +203,21 @@ impl Roster {
 
     /// Every Agent, in the order they were hired.
     pub fn agents(&self) -> Vec<Agent> {
-        lock(&self.inner).agents.clone()
+        mutex(&self.inner).agents.clone()
+    }
+}
+
+/// The most messages an Agent's conversation keeps. Older turns are dropped
+/// so one long-lived Agent cannot grow memory without bound (KR-06/SD-05):
+/// every [`Agent::ask`] adds two turns, so without a cap a busy Agent's
+/// history -- and every request built from it -- grows forever.
+pub const MAX_HISTORY_MESSAGES: usize = 100;
+
+/// Drops the oldest turns of `history` until at most
+/// [`MAX_HISTORY_MESSAGES`] remain.
+fn prune_history(history: &mut Vec<Message>) {
+    if history.len() > MAX_HISTORY_MESSAGES {
+        history.drain(..history.len() - MAX_HISTORY_MESSAGES);
     }
 }
 
@@ -221,28 +257,28 @@ impl Agent {
 
     /// Overrides the Role's Model chain for this Agent only.
     pub fn set_model_chain(&self, chain: Vec<Provider>) {
-        *lock(&self.state.chain_override) = Some(chain);
+        *mutex(&self.state.chain_override) = Some(chain);
     }
 
     /// Goes back to the Role's Model chain.
     pub fn clear_model_chain(&self) {
-        *lock(&self.state.chain_override) = None;
+        *mutex(&self.state.chain_override) = None;
     }
 
     /// Reports each fallback along this Agent's Model chain to `listener`.
     pub fn on_event(&self, listener: impl Fn(ChainEvent) + Send + Sync + 'static) {
-        *lock(&self.state.on_event) = Some(Arc::new(listener));
+        *mutex(&self.state.on_event) = Some(Arc::new(listener));
     }
 
     fn model_chain(&self) -> Vec<Provider> {
-        lock(&self.state.chain_override)
+        mutex(&self.state.chain_override)
             .clone()
             .unwrap_or_else(|| self.state.role.model_chain.clone())
     }
 
     /// How many messages the Agent's own conversation holds.
     pub fn history_len(&self) -> usize {
-        *lock(&self.state.history_len)
+        *mutex(&self.state.history_len)
     }
 
     /// The branch name for this Agent's work on `topic`: `<agent-name>/<topic>`.
@@ -271,7 +307,7 @@ impl Agent {
             .ok_or_else(|| AgentError::Provider("the Model chain is empty".into()))?;
         let role = &self.state.role;
         let mut node = AgentNode::with_chain(chain, &role.instructions);
-        if let Some(listener) = lock(&self.state.on_event).clone() {
+        if let Some(listener) = mutex(&self.state.on_event).clone() {
             node = node.on_event(move |e| listener(e));
         }
         for tool in &role.tools {
@@ -280,7 +316,8 @@ impl Agent {
         let mut conversation = self.state.conversation.lock().await;
         let (answer, turns, usage) = node.converse(&conversation, request).await?;
         conversation.extend(turns);
-        *lock(&self.state.history_len) = conversation.len();
+        prune_history(&mut conversation);
+        *mutex(&self.state.history_len) = conversation.len();
         Ok((answer, usage))
     }
 }
@@ -316,5 +353,65 @@ impl<S: Send + 'static> GraphBuilder<S> {
                 write(state, answer)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+
+    fn message(text: &str) -> Message {
+        Message::new_human_message(text)
+    }
+
+    #[test]
+    fn history_is_pruned_to_the_cap_keeping_the_newest_turns() {
+        let mut history: Vec<Message> = (0..MAX_HISTORY_MESSAGES + 3)
+            .map(|i| message(&format!("turn {i}")))
+            .collect();
+        prune_history(&mut history);
+        assert_eq!(history.len(), MAX_HISTORY_MESSAGES);
+        // The 100 kept are the newest: "turn 0".."turn 2" were dropped.
+        assert_eq!(history.first().unwrap().content, "turn 3");
+        assert_eq!(history.last().unwrap().content, "turn 102");
+    }
+
+    #[test]
+    fn history_at_or_below_the_cap_is_untouched() {
+        let mut history: Vec<Message> = (0..10)
+            .map(|i| message(&format!("turn {i}")))
+            .collect();
+        prune_history(&mut history);
+        assert_eq!(history.len(), 10);
+        let mut empty: Vec<Message> = Vec::new();
+        prune_history(&mut empty);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn hire_gets_capped_default() {
+        let roster = Roster::new();
+        roster.add_role(Role::new("Writer", "Be brief"));
+        let agent = roster.hire("Writer", "Nova").expect("hire");
+        assert_eq!(agent.budget_tokens(), Some(DEFAULT_ROLE_BUDGET_TOKENS));
+        assert_eq!(DEFAULT_ROLE_BUDGET_TOKENS, 100_000);
+    }
+
+    #[test]
+    fn hire_with_explicit_budget_keeps_it() {
+        let roster = Roster::new();
+        roster.add_role(Role::new("Writer", "Be brief").budget_tokens(500));
+        let agent = roster.hire("Writer", "Nova").unwrap();
+        assert_eq!(agent.budget_tokens(), Some(500));
+    }
+
+    #[test]
+    fn explicit_unlimited_requires_opt_in() {
+        let roster = Roster::new();
+        roster.add_role(Role::new("Writer", "Be brief").without_budget_limit());
+        let agent = roster.hire("Writer", "Nova").unwrap();
+        assert_eq!(agent.budget_tokens(), None);
+
     }
 }

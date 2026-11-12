@@ -10,13 +10,15 @@
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
+use crate::http_guard::{read_capped, shared_client, text_capped, validate_endpoint};
+use crate::locks::mutex;
 use crate::{AgentTool, ApprovalDecision, ApprovalRequest, Approver};
 
 const PROTOCOL_VERSION: &str = "2025-03-26";
@@ -133,11 +135,22 @@ impl McpClient {
                     stdout: BufReader::new(stdout).lines(),
                 })))
             }
-            Transport::Http { url } => Conn::Http {
-                client: reqwest::Client::new(),
-                url: url.clone(),
-                session: Mutex::new(None),
-            },
+            Transport::Http { url } => {
+                // The server URL is operator configuration (and an approved
+                // server on top of that), so it goes through the operator
+                // check — but it is still validated before anything connects,
+                // and every request then uses the shared hardened client.
+                validate_endpoint(url).map_err(|e| {
+                    McpError::Transport(format!("refused MCP server URL {url}: {e}"))
+                })?;
+                Conn::Http {
+                    client: shared_client().map_err(|e| {
+                        McpError::Transport(format!("could not build HTTP client: {e}"))
+                    })?,
+                    url: url.clone(),
+                    session: Mutex::new(None),
+                }
+            }
         };
         let client = Self {
             inner: Arc::new(Inner {
@@ -296,7 +309,7 @@ impl McpClient {
             .post(url)
             .header("Accept", "application/json, text/event-stream")
             .json(message);
-        if let Some(id) = lock(session).clone() {
+        if let Some(id) = mutex(session).clone() {
             request = request.header("Mcp-Session-Id", id);
         }
         let response = request
@@ -314,12 +327,13 @@ impl McpClient {
             .get("mcp-session-id")
             .and_then(|v| v.to_str().ok())
         {
-            *lock(session) = Some(id.to_string());
+            *mutex(session) = Some(id.to_string());
         }
-        response
-            .text()
+        // The reply is read capped at 2 MiB instead of unbounded (KR-01).
+        let body = read_capped(response)
             .await
-            .map_err(|e| McpError::Transport(e.to_string()))
+            .map_err(|e| McpError::Transport(e.to_string()))?;
+        Ok(text_capped(body))
     }
 }
 
@@ -375,10 +389,6 @@ fn render_content(result: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// An MCP server waiting for a person to approve it for a Role.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingMcpServer {
@@ -410,7 +420,7 @@ impl McpLibrary {
 
     /// Holds `server` for `role` until a person approves it.
     pub fn propose(&self, role: &str, server: McpServer) {
-        lock(&self.inner).pending.push(PendingMcpServer {
+        mutex(&self.inner).pending.push(PendingMcpServer {
             role: role.to_string(),
             server,
         });
@@ -418,7 +428,7 @@ impl McpLibrary {
 
     /// The servers waiting for approval, oldest first.
     pub fn pending(&self) -> Vec<PendingMcpServer> {
-        lock(&self.inner).pending.clone()
+        mutex(&self.inner).pending.clone()
     }
 
     /// Asks `approver` about every pending server. Approved ones are given to
@@ -439,7 +449,7 @@ impl McpLibrary {
             if decision == ApprovalDecision::Pending {
                 continue;
             }
-            let mut inner = lock(&self.inner);
+            let mut inner = mutex(&self.inner);
             if let Some(i) = inner.pending.iter().position(|p| *p == item) {
                 inner.pending.remove(i);
             }
@@ -455,7 +465,7 @@ impl McpLibrary {
 
     /// The approved servers of a Role.
     pub fn servers_for_role(&self, role: &str) -> Vec<McpServer> {
-        lock(&self.inner)
+        mutex(&self.inner)
             .approved
             .get(role)
             .cloned()
@@ -469,5 +479,71 @@ impl McpLibrary {
             tools.extend(McpClient::connect(&server).await?.tools().await?);
         }
         Ok(tools)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            // A current-thread runtime with no special settings always builds.
+            .expect("a test runtime always builds")
+            .block_on(future)
+    }
+
+    /// A malformed server URL fails in `connect` before anything connects —
+    /// so these tests need no network.
+    #[test]
+    fn http_server_with_a_bad_url_is_refused_before_connecting() {
+        for url in [
+            "file:///etc/passwd",
+            "ftp://example.com/mcp",
+            "https://user:pass@example.com/mcp",
+            "https://",
+            "not a url",
+        ] {
+            // `McpClient` has no `Debug`, so the whole `Result` cannot be
+            // formatted — match and only format the `McpError` (which is
+            // `Debug`) on failure.
+            match block_on(McpClient::connect(&McpServer::http("x", url))) {
+                Err(McpError::Transport(_)) => {}
+                Err(e) => panic!("{url} must be refused with a Transport error, got {e:?}"),
+                Ok(_) => panic!("{url} must be refused with a Transport error, but it connected"),
+            }
+        }
+    }
+
+    /// An operator-configured loopback server is allowed through validation:
+    /// nothing listens on the port, so connecting fails fast instead of
+    /// being refused. (The port is taken from a listener that is closed
+    /// first, so nothing can be listening on it — but if another test's
+    /// server happens to reuse the port in that short window, the failure
+    /// is some other error, not a refusal; the assertion only pins down
+    /// "attempted, not refused".)
+    #[test]
+    fn http_server_on_loopback_is_attempted_not_blocked() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("binding a loopback listener always works")
+            .local_addr()
+            .expect("a bound listener always has an address")
+            .port();
+        let err = block_on(McpClient::connect(&McpServer::http(
+            "x",
+            format!("http://127.0.0.1:{port}/mcp"),
+        )));
+        assert!(
+            err.is_err(),
+            "connecting to a closed loopback port must fail"
+        );
+        if let Err(McpError::Transport(message)) = &err {
+            assert!(
+                !message.contains("refused"),
+                "loopback must be attempted, not refused, got {message:?}"
+            );
+        }
     }
 }

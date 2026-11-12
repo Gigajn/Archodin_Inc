@@ -124,7 +124,7 @@ async fn a_job_over_budget_pauses_then_continues_when_the_overrun_is_approved() 
 #[tokio::test]
 async fn rejecting_the_overrun_stops_the_job() {
     let meter = Arc::new(UsageMeter::new());
-    meter.set_job_budget("job-1", Budget::cost(0.5));
+    meter.set_job_budget("job-1", Budget::cost(0.5).unwrap());
     let store = InMemoryCheckpointStore::new();
     let no = BudgetApprover::new(
         meter.clone(),
@@ -150,7 +150,7 @@ async fn rejecting_the_overrun_stops_the_job() {
 #[tokio::test]
 async fn within_budget_the_person_is_never_asked() {
     let meter = Arc::new(UsageMeter::new());
-    meter.set_job_budget("job-1", Budget::tokens(1000).with_cost(10.0));
+    meter.set_job_budget("job-1", Budget::tokens(1000).with_cost(10.0).unwrap());
     let store = InMemoryCheckpointStore::new();
     let approver = BudgetApprover::new(meter.clone(), ScriptedApprover::new([]));
     let outcome = graph(&meter)
@@ -166,7 +166,7 @@ async fn an_agent_budget_works_the_same_way() {
     let meter = Arc::new(UsageMeter::new());
     // Lumen may spend $0.20 and its first step costs $0.25; only Lumen's own
     // steps are gated, so "review" (Qadi) runs and "polish" (Lumen) waits.
-    meter.set_agent_budget("Lumen", Budget::cost(0.2));
+    meter.set_agent_budget("Lumen", Budget::cost(0.2).unwrap());
     let store = InMemoryCheckpointStore::new();
     let wait = BudgetApprover::new(meter.clone(), ScriptedApprover::new([]));
     let paused = graph(&meter)
@@ -190,7 +190,7 @@ async fn an_agent_budget_works_the_same_way() {
 
     // A rejection stops a Job the same way.
     let meter = Arc::new(UsageMeter::new());
-    meter.set_agent_budget("Lumen", Budget::cost(0.2));
+    meter.set_agent_budget("Lumen", Budget::cost(0.2).unwrap());
     let no = BudgetApprover::new(
         meter.clone(),
         ScriptedApprover::new([ApprovalDecision::Rejected]),
@@ -227,7 +227,7 @@ async fn an_agent_node_reports_the_tokens_the_provider_used() {
     assert_eq!(usage.completion_tokens, 500);
 
     // $2 per million prompt tokens and $4 per million completion tokens.
-    let priced = Pricing::per_million(2.0, 4.0).price(usage);
+    let priced = Pricing::per_million(2.0, 4.0).unwrap().price(usage);
     assert!((priced.cost - 0.004).abs() < 1e-9, "{}", priced.cost);
 }
 
@@ -269,10 +269,10 @@ async fn a_roster_agent_is_metered_by_the_pair_that_answered_and_stopped_by_its_
         .await;
     let first = Provider::openai_compatible(limited.url(), "k", "big")
         .account("a")
-        .pricing(Pricing::per_million(100.0, 100.0));
+        .pricing(Pricing::per_million(100.0, 100.0).unwrap());
     let second = Provider::openai_compatible(working.url(), "k", "small")
         .account("b")
-        .pricing(Pricing::per_million(2.0, 4.0));
+        .pricing(Pricing::per_million(2.0, 4.0).unwrap());
 
     let roster = Roster::new();
     roster.add_role(
@@ -336,4 +336,184 @@ async fn a_roster_agent_is_metered_by_the_pair_that_answered_and_stopped_by_its_
     let done = build().run_job("job-1", start, &store, &yes).await.unwrap();
     assert!(matches!(done, JobOutcome::Finished(ref s) if s.answers.len() == 2));
     assert_eq!(meter.agent_usage("Nova").total_tokens(), 3000);
+}
+
+/// Four steps of 60 tokens each, so a 100-token Job Budget pauses twice.
+fn four_step_graph(meter: &Arc<UsageMeter>) -> Graph<Work> {
+    let mut builder = Graph::builder();
+    for name in ["one", "two", "three", "four"] {
+        builder = builder.metered_node(
+            name,
+            "Lumen",
+            meter.clone(),
+            |s: &Work| s.job.clone(),
+            move |mut s: Work| async move {
+                s.done += 1;
+                (s, Usage::new(40, 20, 0.25))
+            },
+        );
+    }
+    builder
+        .edge("one", "two")
+        .edge("two", "three")
+        .edge("three", "four")
+        .entry("one")
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_approved_overrun_is_asked_about_again() {
+    let meter = Arc::new(UsageMeter::new());
+    meter.set_job_budget("job-1", Budget::tokens(100));
+    let store = InMemoryCheckpointStore::new();
+
+    // After "one" and "two" the Job has used 120 tokens: "three" must wait.
+    let ask_later = BudgetApprover::new(meter.clone(), ScriptedApprover::new([]));
+    let paused = four_step_graph(&meter)
+        .run_job("job-1", work("job-1"), &store, &ask_later)
+        .await
+        .unwrap();
+    assert!(matches!(paused, JobOutcome::Paused { ref node, .. } if node == "three"));
+
+    // One approval lets exactly one over-budget step through: "three" runs,
+    // then "four" waits and asks again.
+    let yes_once = BudgetApprover::new(
+        meter.clone(),
+        ScriptedApprover::new([ApprovalDecision::Approved]),
+    );
+    let paused_again = four_step_graph(&meter)
+        .run_job("job-1", work("job-1"), &store, &yes_once)
+        .await
+        .unwrap();
+    match paused_again {
+        JobOutcome::Paused { node, state, .. } => {
+            assert_eq!(node, "four");
+            assert_eq!(state.done, 3);
+        }
+        other => panic!("expected a second pause at four, got {other:?}"),
+    }
+
+    // A second approval finishes the job.
+    let yes_again = BudgetApprover::new(
+        meter.clone(),
+        ScriptedApprover::new([ApprovalDecision::Approved]),
+    );
+    let done = four_step_graph(&meter)
+        .run_job("job-1", work("job-1"), &store, &yes_again)
+        .await
+        .unwrap();
+    assert!(matches!(done, JobOutcome::Finished(ref s) if s.done == 4));
+    assert_eq!(meter.job_usage("job-1").total_tokens(), 240);
+}
+
+#[tokio::test]
+async fn reserve_failure_skips_the_node_and_the_job_asks_again() {
+    // (a) Without a BudgetApprover there is no waiver on record: a node whose
+    // reservation fails does not run and records nothing.
+    let meter = Arc::new(UsageMeter::new());
+    meter.set_agent_budget("Lumen", Budget::tokens(100));
+    meter.record("job-1", "Lumen", Usage::new(0, 150, 0.0));
+    let store = InMemoryCheckpointStore::new();
+    let raw = ScriptedApprover::new([
+        ApprovalDecision::Approved,
+        ApprovalDecision::Approved,
+        ApprovalDecision::Approved,
+        ApprovalDecision::Approved,
+    ]);
+    let outcome = four_step_graph(&meter)
+        .run_job("job-1", work("job-1"), &store, &raw)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, JobOutcome::Finished(ref s) if s.done == 0));
+    assert_eq!(meter.job_usage("job-1").total_tokens(), 150);
+
+    // (b) With a BudgetApprover, one approval lets one node through; the next
+    // over-budget node pauses and asks again.
+    let meter = Arc::new(UsageMeter::new());
+    meter.set_agent_budget("Lumen", Budget::tokens(100));
+    meter.record("job-1", "Lumen", Usage::new(0, 150, 0.0));
+    let store = InMemoryCheckpointStore::new();
+    let yes_once = BudgetApprover::new(
+        meter.clone(),
+        ScriptedApprover::new([ApprovalDecision::Approved]),
+    );
+    let paused = four_step_graph(&meter)
+        .run_job("job-1", work("job-1"), &store, &yes_once)
+        .await
+        .unwrap();
+    match paused {
+        JobOutcome::Paused { node, state, .. } => {
+            assert_eq!(node, "two");
+            assert_eq!(state.done, 1);
+        }
+        other => panic!("expected a pause at two, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn metered_agent_node_applies_the_role_default_cap() {
+    let mut server = Server::new_async().await;
+    server
+        .mock("POST", "/chat/completions")
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "id": "c1", "object": "chat.completion", "created": 0, "model": "fake",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 60000, "completion_tokens": 50000, "total_tokens": 110000}
+            })
+            .to_string(),
+        )
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    let provider = Provider::openai_compatible(server.url(), "k", "small")
+        .account("b")
+        .pricing(Pricing::per_million(2.0, 4.0).unwrap());
+
+    // No .budget_tokens(...) on purpose: the Role default (100_000) must apply.
+    let roster = Roster::new();
+    roster.add_role(Role::new("Writer", "Be brief").model_chain(vec![provider]));
+    let nova = roster.hire("Writer", "Nova").unwrap();
+    assert_eq!(nova.budget_tokens(), Some(100_000));
+
+    let meter = Arc::new(UsageMeter::new());
+    let build = || {
+        let mut builder = Graph::builder();
+        for name in ["one", "two"] {
+            builder = builder.metered_agent_node(
+                name,
+                nova.clone(),
+                meter.clone(),
+                |s: &Ask| s.job.clone(),
+                |_: &Ask| "write".to_string(),
+                |mut s: Ask, a| {
+                    s.answers.push(a.unwrap());
+                    s
+                },
+            );
+        }
+        builder.edge("one", "two").entry("one").build().unwrap()
+    };
+    let store = InMemoryCheckpointStore::new();
+
+    // The first answer (110_000 tokens) is over Nova's 100_000-token default
+    // Budget: "two" waits.
+    let wait = BudgetApprover::new(meter.clone(), ScriptedApprover::new([]));
+    let paused = build()
+        .run_job(
+            "job-1",
+            Ask {
+                job: "job-1".into(),
+                answers: vec![],
+            },
+            &store,
+            &wait,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(paused, JobOutcome::Paused { ref node, .. } if node == "two"));
+    assert_eq!(meter.agent_usage("Nova").total_tokens(), 110_000);
 }

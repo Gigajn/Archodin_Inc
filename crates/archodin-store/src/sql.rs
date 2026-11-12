@@ -43,7 +43,13 @@ const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS akasha (
         role TEXT NOT NULL, fact_key TEXT NOT NULL, seq BIGINT NOT NULL, fact TEXT NOT NULL,
         PRIMARY KEY (role, fact_key))",
+    "CREATE TABLE IF NOT EXISTS schema_meta (
+        key TEXT PRIMARY KEY, value TEXT NOT NULL)",
 ];
+
+/// Schema version of the tables above. Bump when the schema changes and
+/// add the matching migration next to the check in `connect`.
+const SCHEMA_VERSION: i64 = 1;
 
 /// Everything a company keeps, in SQLite or Postgres. Cloning gives another
 /// handle to the same database.
@@ -78,6 +84,36 @@ impl SqlStore {
                 .execute(&pool)
                 .await
                 .map_err(backend)?;
+        }
+        // Stamp the version on fresh databases; refuse a database whose schema
+        // this build does not understand instead of reading it as if it did.
+        // The upsert is race-safe: two first `connect()`s running together
+        // both stamp v1, and only one row wins.
+        let version: Option<String> =
+            sqlx::query("SELECT value FROM schema_meta WHERE key = 'version'")
+                .fetch_optional(&pool)
+                .await
+                .map_err(backend)?
+                .map(|r| r.try_get::<String, _>("value"))
+                .transpose()
+                .map_err(backend)?;
+        match version.as_deref() {
+            None => {
+                sqlx::query(
+                    "INSERT INTO schema_meta (key, value) VALUES ('version', $1)
+                     ON CONFLICT (key) DO NOTHING",
+                )
+                .bind(SCHEMA_VERSION.to_string())
+                .execute(&pool)
+                .await
+                .map_err(backend)?;
+            }
+            Some(v) if v == SCHEMA_VERSION.to_string() => {}
+            Some(v) => {
+                return Err(StoreError::Invalid(format!(
+                    "unsupported schema version {v} (this build expects {SCHEMA_VERSION})"
+                )));
+            }
         }
         Ok(Self { pool })
     }
@@ -150,10 +186,9 @@ impl<S> CheckpointStore<S> for SqlStore
 where
     S: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, ()> {
+    fn save(&self, checkpoint: Checkpoint<S>) -> BoxFuture<'_, Result<(), StoreError>> {
         Box::pin(async move {
-            let state = serde_json::to_string(&checkpoint.state)
-                .expect("a Checkpoint State must serialize to JSON");
+            let state = serde_json::to_string(&checkpoint.state).map_err(invalid)?;
             self.save_checkpoint(
                 &checkpoint.job,
                 checkpoint.step,
@@ -161,26 +196,24 @@ where
                 checkpoint.next.as_deref(),
             )
             .await
-            .unwrap_or_else(|e| panic!("cannot save a Checkpoint: {e}"));
         })
     }
 
-    fn checkpoints(&self, job: &str) -> BoxFuture<'_, Vec<Checkpoint<S>>> {
+    fn checkpoints(&self, job: &str) -> BoxFuture<'_, Result<Vec<Checkpoint<S>>, StoreError>> {
         let job = job.to_string();
         Box::pin(async move {
-            let rows = self
-                .load_checkpoints(&job)
-                .await
-                .unwrap_or_else(|e| panic!("cannot read Checkpoints: {e}"));
+            let rows = self.load_checkpoints(&job).await?;
             rows.into_iter()
-                .map(|(step, state, next)| Checkpoint {
-                    job: job.clone(),
-                    step,
-                    state: serde_json::from_str(&state)
-                        .unwrap_or_else(|e| panic!("a stored Checkpoint State is invalid: {e}")),
-                    next,
+                .map(|(step, state, next)| {
+                    let state: S = serde_json::from_str(&state).map_err(invalid)?;
+                    Ok(Checkpoint {
+                        job: job.clone(),
+                        step,
+                        state,
+                        next,
+                    })
                 })
-                .collect()
+                .collect::<Result<Vec<Checkpoint<S>>, StoreError>>()
         })
     }
 }
