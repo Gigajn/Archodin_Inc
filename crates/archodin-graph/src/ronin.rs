@@ -7,11 +7,13 @@
 //! limits and enables code search). Every Skill found goes to Vigil, which holds the
 //! ones that pass in Codex's queue for a person to approve.
 
+use base64::Engine as _;
 use futures::future::BoxFuture;
 use langchain_rust::tools::DuckDuckGoSearchResults;
 
 use crate::http_guard::{
     read_capped, same_origin, shared_client, text_capped, validate_endpoint, validate_url,
+    MAX_RESPONSE_BYTES,
 };
 use crate::{
     AgentError, AgentNode, Assignment, Skill, SkillLibrary, SkillSource, Strategos, StrategosError,
@@ -277,6 +279,19 @@ impl SearchEngine for DuckDuckGoSearch {
 
 /// The GitHub API: repository search works without a login; a token raises the
 /// rate limits and also enables code search for `SKILL.md` files.
+///
+/// Search and file fetch go through the typed octocrab handlers
+/// (`search().repositories()`, `search().code()`, `repos().get_content()`),
+/// and the octocrab type never leaves this struct — the `SearchEngine` seam
+/// (`search` + `fetch`) is unchanged (ADR 0008).
+///
+/// Three compensations keep the KR-01 protections the hand-rolled client had:
+/// the base URI is validated once with `validate_endpoint` at construction;
+/// every request runs on `http_guard::shared_client()` (30 s timeout, the
+/// audited redirect policy), injected via `ReqwestClientConfig::Custom`; and
+/// a fetched file is capped — `Content.size` is checked before its base64
+/// body is decoded, and the encoded payload itself is bounded too, so a
+/// lying `size` field cannot smuggle a huge allocation in.
 pub struct GitHubSearch {
     api_url: String,
     token: Option<String>,
@@ -284,11 +299,16 @@ pub struct GitHubSearch {
 
 impl GitHubSearch {
     /// Searches the GitHub API at `api_url` (normally `https://api.github.com`).
-    pub fn new(api_url: impl Into<String>) -> Self {
-        Self {
-            api_url: api_url.into().trim_end_matches('/').to_string(),
+    /// The URL is validated once here, with the operator check, so a blocked
+    /// shape fails at construction instead of at the first request.
+    pub fn new(api_url: impl Into<String>) -> Result<Self, RoninError> {
+        let api_url = api_url.into().trim_end_matches('/').to_string();
+        validate_endpoint(&api_url)
+            .map_err(|e| RoninError::Search(format!("refused GitHub API URL {api_url}: {e}")))?;
+        Ok(Self {
+            api_url,
             token: None,
-        }
+        })
     }
 
     /// Uses `token` for every request.
@@ -297,27 +317,163 @@ impl GitHubSearch {
         self
     }
 
-    async fn items(&self, path: &str, query: &str) -> Result<Vec<serde_json::Value>, RoninError> {
-        let url = format!(
-            "{}{path}?q={}&per_page={HITS_PER_ENGINE}",
-            self.api_url,
-            encode(query)
-        );
-        // The API base URL is operator configuration, so this request goes
-        // through the operator check; a hit on the same origin as this API
-        // is fetched the same way (see `GitHubSearch::fetch`), any other
-        // hit origin stays strict.
-        let body = get_text_checked(
-            &url,
-            Some("application/vnd.github+json"),
-            self.token.as_deref(),
-            true,
-        )
-        .await?;
-        let json: serde_json::Value =
-            serde_json::from_str(&body).map_err(|e| RoninError::Search(e.to_string()))?;
-        Ok(json["items"].as_array().cloned().unwrap_or_default())
+    /// The octocrab client for this search: the operator-validated base URI,
+    /// the optional token as a `Bearer` header, and the hardened shared
+    /// client underneath. Built per call — cloning the shared client is cheap
+    /// (reference-counted) and the builder only assembles layers — so
+    /// `token()` stays a plain builder method with no cache to go stale.
+    fn crab(&self) -> Result<octocrab::Octocrab, RoninError> {
+        let mut builder = octocrab::Octocrab::builder();
+        builder = builder
+            .base_uri(self.api_url.as_str())
+            .map_err(|e| RoninError::Search(e.to_string()))?;
+        if let Some(token) = &self.token {
+            builder = builder.personal_token(token.clone());
+        }
+        let client = shared_client()
+            .map_err(|e| RoninError::Search(format!("could not build HTTP client: {e}")))?;
+        builder
+            .build_with_reqwest(octocrab::ReqwestClientConfig::Custom(client))
+            .map_err(|e| RoninError::Search(e.to_string()))
     }
+
+    /// Repositories matching `query`, each pointing at its `SKILL.md` on the
+    /// contents API. A hit without a `full_name` is dropped: there is no
+    /// contents URL to build for it.
+    async fn search_repositories(&self, query: &str) -> Result<Vec<SearchHit>, RoninError> {
+        let page = self
+            .crab()?
+            .search()
+            .repositories(query)
+            .per_page(HITS_PER_ENGINE as u8)
+            .send()
+            .await
+            .map_err(|e| RoninError::Search(e.to_string()))?;
+        Ok(page
+            .items
+            .into_iter()
+            .filter_map(|r| {
+                let full_name = r.full_name?;
+                Some(SearchHit {
+                    url: format!("{}/repos/{full_name}/contents/SKILL.md", self.api_url),
+                    title: full_name,
+                    snippet: r.description.unwrap_or_default(),
+                })
+            })
+            .collect())
+    }
+
+    /// `SKILL.md` files matching `query` (code search, token only).
+    async fn search_code(&self, query: &str) -> Result<Vec<SearchHit>, RoninError> {
+        let page = self
+            .crab()?
+            .search()
+            .code(&format!("{query} filename:SKILL.md"))
+            .per_page(HITS_PER_ENGINE as u8)
+            .send()
+            .await
+            .map_err(|e| RoninError::Search(e.to_string()))?;
+        Ok(page
+            .items
+            .into_iter()
+            .map(|c| SearchHit {
+                title: c.html_url.to_string(),
+                url: c.url.to_string(),
+                snippet: c.name,
+            })
+            .collect())
+    }
+
+    /// The `SKILL.md` behind a contents-API path, decoded from the typed
+    /// `get_content` answer. The declared `size` is the decoded size, so it
+    /// is checked before the base64 body is decoded; the encoded payload is
+    /// bounded as well, because the field could lie. `Content::decoded_content`
+    /// is deliberately not used: it unwraps a bad base64 body, and a panic on
+    /// a job path is not an error (KR-06).
+    async fn fetch_contents(
+        &self,
+        owner: &str,
+        repo: &str,
+        path: &str,
+    ) -> Result<String, RoninError> {
+        let at = format!("{}/repos/{owner}/{repo}/contents/{path}", self.api_url);
+        let refused = |why: &str| RoninError::Fetch(format!("{at}: {why}"));
+        let mut items = self
+            .crab()?
+            .repos(owner, repo)
+            .get_content()
+            .path(path)
+            .send()
+            .await
+            .map_err(|e| RoninError::Fetch(e.to_string()))?;
+        let mut items = items.take_items();
+        if items.len() != 1 {
+            return Err(refused("not a single file"));
+        }
+        // Exactly one item was just checked.
+        let item = items.pop().expect("one item");
+        if item.r#type != "file" {
+            return Err(refused("not a file"));
+        }
+        if item.size < 0 || item.size as u64 > MAX_RESPONSE_BYTES as u64 {
+            return Err(refused(&format!(
+                "exceeds the {MAX_RESPONSE_BYTES} byte limit"
+            )));
+        }
+        if let Some(encoding) = &item.encoding {
+            if encoding != "base64" {
+                return Err(refused(&format!("unsupported encoding {encoding}")));
+            }
+        }
+        let encoded = item.content.unwrap_or_default();
+        // Base64 inflates by 4/3 plus padding: bound the payload itself so a
+        // small `size` field cannot smuggle a huge decode in.
+        if encoded.len() > MAX_RESPONSE_BYTES * 4 / 3 + 4 {
+            return Err(refused(&format!(
+                "exceeds the {MAX_RESPONSE_BYTES} byte limit"
+            )));
+        }
+        let cleaned: Vec<u8> = encoded
+            .bytes()
+            .filter(|b| !b.is_ascii_whitespace())
+            .collect();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&cleaned)
+            .map_err(|e| refused(&format!("not valid base64: {e}")))?;
+        // The encoded-length bound above cannot tell 2 MiB from 2 MiB + 1
+        // (base64 padding), so the decoded length is checked too: this is
+        // what catches a lying `size` field.
+        if decoded.len() > MAX_RESPONSE_BYTES {
+            return Err(refused(&format!(
+                "exceeds the {MAX_RESPONSE_BYTES} byte limit"
+            )));
+        }
+        Ok(String::from_utf8_lossy(&decoded).into_owned())
+    }
+}
+
+/// Splits a contents-API URL on this API's own origin into
+/// `(owner, repo, path)`: `/repos/{owner}/{repo}/contents/{path...}`.
+/// Anything else (another origin, another route) is not a contents URL.
+fn parse_contents_url(base: &str, url: &str) -> Option<(String, String, String)> {
+    if !same_origin(base, url) {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let mut segments = parsed.path_segments()?;
+    if segments.next()? != "repos" {
+        return None;
+    }
+    let owner = segments.next()?.to_string();
+    let repo = segments.next()?.to_string();
+    if segments.next()? != "contents" {
+        return None;
+    }
+    let path: Vec<&str> = segments.collect();
+    if path.is_empty() {
+        return None;
+    }
+    Some((owner, repo, path.join("/")))
 }
 
 impl SearchEngine for GitHubSearch {
@@ -330,32 +486,18 @@ impl SearchEngine for GitHubSearch {
             let mut hits = Vec::new();
             let mut failure = None;
             let mut succeeded = false;
-            match self.items("/search/repositories", query).await {
+            match self.search_repositories(query).await {
                 Ok(items) => {
                     succeeded = true;
-                    hits.extend(items.iter().map(|r| {
-                        let name = str_field(r, "full_name");
-                        SearchHit {
-                            url: format!("{}/repos/{name}/contents/SKILL.md", self.api_url),
-                            title: name,
-                            snippet: str_field(r, "description"),
-                        }
-                    }));
+                    hits.extend(items);
                 }
                 Err(e) => failure = Some(e),
             }
             if self.token.is_some() {
-                match self
-                    .items("/search/code", &format!("{query} filename:SKILL.md"))
-                    .await
-                {
+                match self.search_code(query).await {
                     Ok(items) => {
                         succeeded = true;
-                        hits.extend(items.iter().map(|c| SearchHit {
-                            title: str_field(c, "html_url"),
-                            url: str_field(c, "url"),
-                            snippet: str_field(c, "name"),
-                        }));
+                        hits.extend(items);
                     }
                     Err(e) => failure = Some(e),
                 }
@@ -370,17 +512,22 @@ impl SearchEngine for GitHubSearch {
     fn fetch<'a>(&'a self, hit: &'a SearchHit) -> BoxFuture<'a, Result<String, RoninError>> {
         Box::pin(async move {
             // A hit on the same origin as this GitHub API (the contents API
-            // lives there) is served by the operator's own service, so it
-            // uses the operator check; any other origin is
-            // attacker-influenced and stays strict.
-            let operator = same_origin(&self.api_url, &hit.url);
-            get_text_checked(
-                &hit.url,
-                Some("application/vnd.github.raw+json"),
-                self.token.as_deref(),
-                operator,
-            )
-            .await
+            // lives there) goes through the typed octocrab handler; any other
+            // origin is attacker-influenced and stays on the strict path, and
+            // a same-origin URL that is not a contents URL keeps the old raw
+            // fetch instead of being forced into a shape it has not got.
+            if let Some((owner, repo, path)) = parse_contents_url(&self.api_url, &hit.url) {
+                self.fetch_contents(&owner, &repo, &path).await
+            } else {
+                let operator = same_origin(&self.api_url, &hit.url);
+                get_text_checked(
+                    &hit.url,
+                    Some("application/vnd.github.raw+json"),
+                    self.token.as_deref(),
+                    operator,
+                )
+                .await
+            }
         })
     }
 }
@@ -607,5 +754,241 @@ mod tests {
             matches!(err, Err(RoninError::Search(_))),
             "a redirect to metadata must fail while sending, got {err:?}"
         );
+    }
+
+    /// The operator-configured GitHub base URI is validated once, at
+    /// construction: a blocked shape never reaches the HTTP client, and a
+    /// plain-`http` loopback endpoint (the mock servers in these tests) is
+    /// still accepted because the operator chose it (ADR 0008).
+    #[test]
+    fn github_search_rejects_a_blocked_base_uri_at_construction() {
+        for url in [
+            "ftp://example.com",
+            "file:///etc/passwd",
+            "https://user:pass@api.github.com",
+            "https://",
+            "not a url",
+        ] {
+            assert!(
+                GitHubSearch::new(url).is_err(),
+                "{url} must be rejected at construction"
+            );
+        }
+        for url in [
+            "https://api.github.com",
+            "http://127.0.0.1:1234",
+            "http://localhost:8080",
+        ] {
+            assert!(
+                GitHubSearch::new(url).is_ok(),
+                "{url} must be accepted as an operator endpoint"
+            );
+        }
+    }
+
+    /// The configured token is sent as an `Authorization: Bearer` header on
+    /// the octocrab path (a mock server proves the header arrives).
+    #[test]
+    fn github_search_sends_the_configured_token() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/search/repositories")
+            .match_query(mockito::Matcher::Any)
+            .match_header("authorization", "Bearer tok-1")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"items": []}"#)
+            .create();
+        let engine = GitHubSearch::new(server.url())
+            .expect("a mock URL is a valid operator endpoint")
+            .token("tok-1");
+        let hits = block_on(engine.search("sql agent skill SKILL.md"))
+            .expect("the search itself succeeds");
+        assert!(hits.is_empty());
+        mock.assert();
+    }
+
+    /// A contents entry whose declared size is over the 2 MiB cap is refused
+    /// before its base64 body is decoded (KR-01, ADR 0008).
+    #[test]
+    fn github_fetch_refuses_a_file_over_the_size_limit() {
+        use base64::Engine as _;
+        let mut server = mockito::Server::new();
+        let mock = server
+            // `match_query` is required: octocrab's `get_content` serializes
+            // an empty parameter set, so the request arrives as
+            // `.../SKILL.md?` (trailing `?`), which an exact path never
+            // matches — mockito compares against path-and-query.
+            .mock("GET", "/repos/a/b/contents/SKILL.md")
+            .match_query(mockito::Matcher::Any)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "type": "file",
+                    "encoding": "base64",
+                    "size": MAX_RESPONSE_BYTES + 1,
+                    "name": "SKILL.md",
+                    "path": "SKILL.md",
+                    "content": base64::engine::general_purpose::STANDARD.encode("tiny"),
+                    "sha": "abc",
+                    "url": format!("{}/repos/a/b/contents/SKILL.md", server.url()),
+                    "git_url": format!("{}/repos/a/b/git/blobs/abc", server.url()),
+                    "html_url": "https://github.com/a/b/blob/main/SKILL.md",
+                    "download_url": format!("{}/a/b/raw/SKILL.md", server.url()),
+                    "_links": {"self": format!("{}/repos/a/b/contents/SKILL.md", server.url())},
+                })
+                .to_string(),
+            )
+            .create();
+        let engine =
+            GitHubSearch::new(server.url()).expect("a mock URL is a valid operator endpoint");
+        let hit = SearchHit {
+            title: "a/b".to_string(),
+            url: format!("{}/repos/a/b/contents/SKILL.md", server.url()),
+            snippet: String::new(),
+        };
+        let err = block_on(engine.fetch(&hit));
+        mock.assert();
+        match err {
+            Err(RoninError::Fetch(message)) => assert!(
+                message.contains("exceed"),
+                "an over-limit file must fail as too large, got {message:?}"
+            ),
+            other => panic!("an over-limit file must fail as too large, got {other:?}"),
+        }
+    }
+
+    /// The declared size is not trusted on its own: a payload whose base64
+    /// body is over the cap is refused even when the `size` field claims
+    /// the file is small.
+    #[test]
+    fn github_fetch_refuses_an_oversized_payload_with_a_lying_size_field() {
+        use base64::Engine as _;
+        let mut server = mockito::Server::new();
+        let huge =
+            base64::engine::general_purpose::STANDARD.encode(vec![b'x'; MAX_RESPONSE_BYTES + 1]);
+        let mock = server
+            .mock("GET", "/repos/a/b/contents/SKILL.md")
+            .match_query(mockito::Matcher::Any)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "type": "file",
+                    "encoding": "base64",
+                    "size": 3,
+                    "name": "SKILL.md",
+                    "path": "SKILL.md",
+                    "content": huge,
+                    "sha": "abc",
+                    "url": format!("{}/repos/a/b/contents/SKILL.md", server.url()),
+                    "git_url": format!("{}/repos/a/b/git/blobs/abc", server.url()),
+                    "html_url": "https://github.com/a/b/blob/main/SKILL.md",
+                    "download_url": format!("{}/a/b/raw/SKILL.md", server.url()),
+                    "_links": {"self": format!("{}/repos/a/b/contents/SKILL.md", server.url())},
+                })
+                .to_string(),
+            )
+            .create();
+        let engine =
+            GitHubSearch::new(server.url()).expect("a mock URL is a valid operator endpoint");
+        let hit = SearchHit {
+            title: "a/b".to_string(),
+            url: format!("{}/repos/a/b/contents/SKILL.md", server.url()),
+            snippet: String::new(),
+        };
+        let err = block_on(engine.fetch(&hit));
+        mock.assert();
+        assert!(
+            matches!(err, Err(RoninError::Fetch(_))),
+            "an oversized payload must be refused, got {err:?}"
+        );
+    }
+
+    /// No retry: a failed search is attempted exactly once. Octocrab is built
+    /// without the `retry` feature, so there is no `RetryLayer` in the stack —
+    /// a rate limit (or a 5xx) surfaces as an error instead of being retried
+    /// behind Ronin's back. ADR 0008 leaves the choice to the integration
+    /// (HandleRateLimits or no retry); this integration chooses no retry,
+    /// and this test pins that choice.
+    #[test]
+    fn github_search_does_not_retry_a_failed_request() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/search/repositories")
+            .match_query(mockito::Matcher::Any)
+            .with_status(500)
+            .with_body(r#"{"message": "Internal Server Error"}"#)
+            .expect(1)
+            .create();
+        let engine =
+            GitHubSearch::new(server.url()).expect("a mock URL is a valid operator endpoint");
+        let err = block_on(engine.search("sql agent skill SKILL.md"));
+        mock.assert();
+        assert!(
+            matches!(err, Err(RoninError::Search(_))),
+            "a failed search must surface as an error, got {err:?}"
+        );
+    }
+
+    /// A redirect to the cloud metadata address is refused on the octocrab
+    /// path too: with octocrab built without `follow-redirect`, no Tower
+    /// layer runs ahead of the injected shared client's redirect policy
+    /// (KR-01, ADR 0008).
+    #[test]
+    fn github_search_refuses_a_redirect_to_the_metadata_address() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/search/repositories")
+            .match_query(mockito::Matcher::Any)
+            .with_status(302)
+            .with_header("location", "https://169.254.169.254/")
+            .create();
+        let engine =
+            GitHubSearch::new(server.url()).expect("a mock URL is a valid operator endpoint");
+        let err = block_on(engine.search("sql agent skill SKILL.md"));
+        mock.assert();
+        assert!(
+            matches!(err, Err(RoninError::Search(_))),
+            "a redirect to metadata must fail on the octocrab path, got {err:?}"
+        );
+    }
+
+    /// A small file behind a contents URL decodes through the octocrab path.
+    #[test]
+    fn github_fetch_decodes_a_small_file() {
+        use base64::Engine as _;
+        let text = "---\nname: sql\ndescription: Query databases\n---\nWrite careful SQL.\n";
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/repos/a/b/contents/SKILL.md")
+            .match_query(mockito::Matcher::Any)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "type": "file",
+                    "encoding": "base64",
+                    "size": text.len(),
+                    "name": "SKILL.md",
+                    "path": "SKILL.md",
+                    "content": base64::engine::general_purpose::STANDARD.encode(text),
+                    "sha": "abc",
+                    "url": format!("{}/repos/a/b/contents/SKILL.md", server.url()),
+                    "git_url": format!("{}/repos/a/b/git/blobs/abc", server.url()),
+                    "html_url": "https://github.com/a/b/blob/main/SKILL.md",
+                    "download_url": format!("{}/a/b/raw/SKILL.md", server.url()),
+                    "_links": {"self": format!("{}/repos/a/b/contents/SKILL.md", server.url())},
+                })
+                .to_string(),
+            )
+            .create();
+        let engine =
+            GitHubSearch::new(server.url()).expect("a mock URL is a valid operator endpoint");
+        let hit = SearchHit {
+            title: "a/b".to_string(),
+            url: format!("{}/repos/a/b/contents/SKILL.md", server.url()),
+            snippet: String::new(),
+        };
+        let fetched = block_on(engine.fetch(&hit)).expect("a small file decodes");
+        mock.assert();
+        assert_eq!(fetched, text);
     }
 }

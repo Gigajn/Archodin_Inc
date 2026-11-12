@@ -21,22 +21,32 @@
 //!   at most 5 redirects, and a redirect is followed only when its target
 //!   passes the strict check or stays on the same origin as the request that
 //!   started the chain (so a redirect can never smuggle a request from a
-//!   public URL to the metadata address).
+//!   public URL to the metadata address). The client is built with an
+//!   http-acl filtering DNS resolver ([`egress_acl`]): every hostname is
+//!   re-checked as it resolves, so a public name that answers with a
+//!   private, loopback, link-local, or metadata address is dropped before
+//!   any connection is attempted (ADR 0010).
 //! - [`read_capped`] — reads a response body up to [`MAX_RESPONSE_BYTES`]
 //!   (2 MiB) and errors instead of growing without bound.
 //!
-//! Residual risk, stated plainly: a *hostname* is not resolved here, so a
-//! public name that resolves to a private address (DNS rebinding / a
-//! compromised resolver) is not caught — only IP literals and the
-//! `localhost` names are. Closing that needs resolving first and pinning the
-//! connection to a validated address, which `reqwest` cannot express through
-//! this client alone; it is an open follow-up, not something this module
-//! claims to do.
+//! What the resolver cannot do, stated plainly: it sees only the hostname,
+//! not which check a URL passed, so it cannot tell an operator endpoint
+//! from an untrusted one. The one deliberate hole is the loopback literal
+//! `127.0.0.1`, pinned by a trusted static mapping so operator endpoints
+//! (and the mockito tests) can still reach a local service: a *hostname*
+//! that resolves to loopback is still dropped, and an untrusted URL that
+//! names the literal is refused earlier, by [`validate_url`]. Operator
+//! endpoints on any other private IP literal (10/8, 172.16/12, 192.168/16)
+//! are refused at resolve time — a deliberate tightening over
+//! [`validate_endpoint`], which still allows them on paper; give such an
+//! endpoint a hostname if it must be reached through this client.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use http_acl::HttpAcl;
+use http_acl_reqwest::HttpAclMiddleware;
 use reqwest::{redirect, Url};
 
 /// The most bytes of a response body that are read (2 MiB).
@@ -237,8 +247,81 @@ pub fn redirect_allowed(previous: &[Url], target: &Url) -> bool {
     }
 }
 
-/// The one client this crate fetches with: a 30 s total timeout and the
-/// redirect policy above. Cloning it is cheap (it is reference-counted).
+/// The http-acl policy every egress request is filtered through at resolve
+/// time (ADR 0010), translated from this module's own values:
+///
+/// - Non-global IPs are denied by http-acl's built-in check
+///   (`allow_non_global_ip_ranges` stays `false`): private, loopback,
+///   link-local, CGNAT, documentation, benchmarking, multicast, reserved,
+///   and IPv6-embedded-IPv4 forms of all of those — at least as broad as
+///   [`is_blocked_ip`], and maintained upstream instead of by hand.
+/// - Ports 80/443 are http-acl's default allow-list; the port default is
+///   opened (`port_acl_default(true)`) because Archodin never restricted
+///   ports and the mockito tests and operator endpoints use ephemeral ones.
+///   A port is not an SSRF vector here — the IP check is the gate.
+/// - Hosts default to allow (`host_acl_default(true)`): any public hostname
+///   may be attempted, and `api.github.com` is named explicitly as the host
+///   Ronin fetches through; the host layer is not the gate, the resolved IP
+///   is. `localhost` names still fail: they resolve to loopback, which the
+///   IP check drops.
+/// - `127.0.0.1` (only that literal) is pinned by a trusted static DNS
+///   mapping, so operator endpoints on loopback — and the mockito tests —
+///   keep working through the guarded client. The mapping is keyed by the
+///   host string, so a hostname that *resolves* to loopback is still
+///   dropped; only the literal itself bypasses the IP check, and
+///   [`validate_url`] refuses that literal for untrusted URLs anyway.
+///
+/// Deliberately NOT wired: `HttpAclMiddleware` as a `reqwest-middleware`
+/// client. That would change [`shared_client`]'s return type from
+/// `reqwest::Client` (which `mcp.rs` stores and `octocrab`/`rmcp` are built
+/// from) to `reqwest_middleware::ClientWithMiddleware`, for a per-request
+/// check that only duplicates what [`validate_url`]/[`validate_endpoint`]
+/// and this resolver already do. The middleware is therefore used only for
+/// the pieces that attach to a plain `reqwest::ClientBuilder`:
+/// `HttpAclMiddleware::dns_resolver`. Redirects keep Archodin's own policy
+/// ([`egress_redirect_policy`]) because http-acl's
+/// `redirect_policy_with_max` re-checks only the redirect target against
+/// the ACL and cannot express "same origin as the chain start".
+pub(crate) fn egress_acl() -> Result<HttpAcl, HttpGuardError> {
+    let acl = HttpAcl::builder()
+        .host_acl_default(true)
+        .ip_acl_default(true)
+        .port_acl_default(true)
+        .add_allowed_host("api.github.com".to_string())
+        .map_err(|e| HttpGuardError::Transport(e.to_string()))?
+        .add_trusted_static_dns_mapping(
+            "127.0.0.1".to_string(),
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        )
+        .map_err(|e| HttpGuardError::Transport(e.to_string()))?
+        .build();
+    Ok(acl)
+}
+
+/// The redirect policy for the shared client: Archodin's own, not http-acl's
+/// (ADR 0010 fallback). `HttpAclMiddleware::redirect_policy_with_max`
+/// re-checks only the redirect target against the ACL, so a hop that stays
+/// on the same origin as the request that started the chain — e.g. an
+/// operator endpoint answering on loopback — would be refused as a
+/// non-global IP. This policy keeps [`redirect_allowed`]: a hop passes when
+/// it clears the strict check or stays on the chain's starting origin, and
+/// at most [`MAX_REDIRECTS`] hops are followed.
+fn egress_redirect_policy() -> redirect::Policy {
+    redirect::Policy::custom(|attempt: redirect::Attempt| {
+        if redirect_allowed(attempt.previous(), attempt.url()) {
+            attempt.follow()
+        } else {
+            let url = attempt.url().clone();
+            attempt.error(format!("redirect to {url} is not allowed"))
+        }
+    })
+}
+
+/// The one client this crate fetches with: a 30 s total timeout, the
+/// redirect policy above, the http-acl filtering resolver from
+/// [`egress_acl`], and no proxy — a proxied request's target is resolved by
+/// the proxy, not by the resolver, so the IP rules would silently not
+/// apply. Cloning it is cheap (it is reference-counted).
 ///
 /// Building the client returns an error instead of panicking: the settings
 /// are fixed constants, so in practice it always builds — but the failure is
@@ -249,17 +332,12 @@ pub fn shared_client() -> Result<reqwest::Client, HttpGuardError> {
     static CLIENT: OnceLock<Result<reqwest::Client, HttpGuardError>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            let policy = redirect::Policy::custom(|attempt: redirect::Attempt| {
-                if redirect_allowed(attempt.previous(), attempt.url()) {
-                    attempt.follow()
-                } else {
-                    let url = attempt.url().clone();
-                    attempt.error(format!("redirect to {url} is not allowed"))
-                }
-            });
+            let middleware = HttpAclMiddleware::new(egress_acl()?);
             reqwest::Client::builder()
                 .timeout(REQUEST_TIMEOUT)
-                .redirect(policy)
+                .redirect(egress_redirect_policy())
+                .dns_resolver(middleware.dns_resolver())
+                .no_proxy()
                 .build()
                 .map_err(|e| HttpGuardError::Transport(e.to_string()))
         })
@@ -525,6 +603,242 @@ mod tests {
             &previous,
             &Url::parse("https://example.com/next").unwrap()
         ));
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a test runtime always builds")
+            .block_on(future)
+    }
+
+    /// The resolver behind `shared_client()` drops blocked IP literals before
+    /// any TCP connection is attempted: resolving them yields no address at
+    /// all. The loopback literal is the one deliberate exception — it is
+    /// pinned by a trusted static mapping so operator endpoints (and the
+    /// mockito tests) can still reach a local service; untrusted URLs that
+    /// name it are refused earlier, by `validate_url`.
+    #[test]
+    fn egress_resolver_drops_blocked_ip_literals() {
+        use reqwest::dns::Resolve;
+        let middleware = HttpAclMiddleware::new(egress_acl().expect("fixed ACL values build"));
+        let resolver = middleware.dns_resolver();
+        for host in ["169.254.169.254", "10.0.0.1", "192.168.1.1", "::1"] {
+            let name: reqwest::dns::Name = host.parse().expect("a test host always parses");
+            let addrs: Vec<_> = block_on(resolver.resolve(name))
+                .expect("resolution itself succeeds")
+                .collect();
+            assert!(
+                addrs.is_empty(),
+                "{host} must resolve to no address, got {addrs:?}"
+            );
+        }
+        let name: reqwest::dns::Name = "127.0.0.1".parse().unwrap();
+        let addrs: Vec<_> = block_on(resolver.resolve(name)).unwrap().collect();
+        assert_eq!(
+            addrs,
+            vec!["127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap()],
+            "the loopback literal resolves through its trusted mapping"
+        );
+    }
+
+    /// A request to a blocked IP literal through the shared client fails —
+    /// and fails fast, inside 10 s: if the resolver let it through, the TCP
+    /// connect to an unroutable address would hang until the 30 s timeout.
+    #[test]
+    fn shared_client_refuses_blocked_ip_literals() {
+        for url in [
+            "http://169.254.169.254/",
+            "https://10.0.0.1/",
+            "https://192.168.1.1/",
+            "https://[::1]/",
+        ] {
+            let outcome = block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    shared_client()
+                        .expect("the shared client builds")
+                        .get(url)
+                        .send(),
+                )
+                .await
+            });
+            assert!(
+                matches!(outcome, Ok(Err(_))),
+                "{url} must fail fast at the resolver, got {outcome:?}"
+            );
+        }
+    }
+
+    /// A stub resolver in the style of http-acl's own `FixedResolver` tests:
+    /// its first answer is a public address, later answers flip to a private
+    /// one. Each resolution is filtered again, so the flipped answer is
+    /// dropped instead of ever being handed to the connector.
+    struct FlippingResolver(std::sync::atomic::AtomicUsize);
+
+    impl reqwest::dns::Resolve for FlippingResolver {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let addr: std::net::SocketAddr = if n == 0 {
+                "93.184.216.34:0".parse().unwrap()
+            } else {
+                "10.0.0.1:0".parse().unwrap()
+            };
+            Box::pin(async move {
+                Ok(Box::new(std::iter::once(addr))
+                    as Box<dyn Iterator<Item = std::net::SocketAddr> + Send>)
+            })
+        }
+    }
+
+    #[test]
+    fn dns_rebinding_is_blocked_when_the_answer_flips() {
+        use reqwest::dns::Resolve;
+        let middleware = HttpAclMiddleware::new(egress_acl().expect("fixed ACL values build"));
+        let resolver = middleware.with_dns_resolver(std::sync::Arc::new(FlippingResolver(
+            std::sync::atomic::AtomicUsize::new(0),
+        )));
+        let name: reqwest::dns::Name = "example.com".parse().unwrap();
+        let first: Vec<_> = block_on(resolver.resolve(name))
+            .expect("the first resolution succeeds")
+            .collect();
+        assert_eq!(
+            first,
+            vec!["93.184.216.34:0".parse::<std::net::SocketAddr>().unwrap()]
+        );
+        let name: reqwest::dns::Name = "example.com".parse().unwrap();
+        let flipped: Vec<_> = block_on(resolver.resolve(name))
+            .expect("the flipped resolution succeeds")
+            .collect();
+        assert!(
+            flipped.is_empty(),
+            "a flipped answer to a private IP must be dropped, got {flipped:?}"
+        );
+    }
+
+    /// Answers every name with one private address, as a stub for a
+    /// resolver that has been poisoned (or a domain that only ever points
+    /// at an internal service).
+    struct AlwaysPrivateResolver;
+
+    impl reqwest::dns::Resolve for AlwaysPrivateResolver {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            let addr: std::net::SocketAddr = "10.0.0.1:0".parse().unwrap();
+            Box::pin(async move {
+                Ok(Box::new(std::iter::once(addr))
+                    as Box<dyn Iterator<Item = std::net::SocketAddr> + Send>)
+            })
+        }
+    }
+
+    /// A hostname that resolves (only) to a private address is refused
+    /// end-to-end: a client built from the same ACL `shared_client()` uses
+    /// never gets an address to dial.
+    #[test]
+    fn shared_client_refuses_a_hostname_that_resolves_to_a_private_ip() {
+        let middleware = HttpAclMiddleware::new(egress_acl().expect("fixed ACL values build"));
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .dns_resolver(middleware.with_dns_resolver(std::sync::Arc::new(AlwaysPrivateResolver)))
+            .redirect(egress_redirect_policy())
+            .build()
+            .expect("a test client builds");
+        let err = block_on(async { client.get("http://example.com/").send().await });
+        assert!(
+            err.is_err(),
+            "a hostname resolving to a private IP must be refused"
+        );
+    }
+
+    /// A redirect to the metadata address is refused end-to-end through the
+    /// shared client (ADR 0010 fallback: http-acl's redirect policy cannot
+    /// express same-origin, so Archodin keeps its own).
+    #[test]
+    fn shared_client_refuses_a_redirect_to_the_metadata_address() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/hop")
+            .with_status(302)
+            .with_header("location", "https://169.254.169.254/")
+            .create();
+        let url = format!("{}/hop", server.url());
+        let err = block_on(async {
+            shared_client()
+                .expect("the shared client builds")
+                .get(&url)
+                .send()
+                .await
+        });
+        mock.assert();
+        assert!(
+            err.is_err(),
+            "a redirect to the metadata address must fail, got {err:?}"
+        );
+    }
+
+    /// ...while a redirect that stays on the same origin is still followed.
+    #[test]
+    fn shared_client_still_follows_a_same_origin_redirect() {
+        let mut server = mockito::Server::new();
+        let hop = server
+            .mock("GET", "/hop")
+            .with_status(302)
+            .with_header("location", &format!("{}/final", server.url()))
+            .create();
+        let fin = server
+            .mock("GET", "/final")
+            .with_status(200)
+            .with_body("ok")
+            .create();
+        let url = format!("{}/hop", server.url());
+        let response = block_on(async {
+            shared_client()
+                .expect("the shared client builds")
+                .get(&url)
+                .send()
+                .await
+        })
+        .expect("a same-origin redirect must be followed");
+        assert_eq!(response.status(), 200);
+        hop.assert();
+        fin.assert();
+    }
+
+    /// ...and a chain past the 5-hop limit still stops.
+    #[test]
+    fn shared_client_still_stops_after_five_redirects() {
+        let mut server = mockito::Server::new();
+        let base = server.url();
+        let mut mocks = Vec::new();
+        for i in 0..6 {
+            let mock = server
+                .mock("GET", format!("/hop{i}").as_str())
+                .with_status(302)
+                .with_header("location", &format!("{base}/hop{}", i + 1))
+                .create();
+            mocks.push(mock);
+        }
+        let _last = server
+            .mock("GET", "/hop6")
+            .with_status(200)
+            .with_body("too far")
+            .create();
+        let url = format!("{base}/hop0");
+        let err = block_on(async {
+            shared_client()
+                .expect("the shared client builds")
+                .get(&url)
+                .send()
+                .await
+        });
+        for mock in mocks {
+            mock.assert();
+        }
+        assert!(
+            err.is_err(),
+            "a chain past 5 redirects must fail, got {err:?}"
+        );
     }
 
     #[test]
