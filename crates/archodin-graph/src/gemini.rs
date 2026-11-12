@@ -407,7 +407,10 @@ impl LLM for Gemini {
 
     fn generate_stream<'a>(&'a self, messages: &'a [Message]) -> LLMEventStream<'a> {
         Box::pin(async_stream::try_stream! {
-            let url = format!("{}?alt=sse", self.url("streamGenerateContent")?);
+            // `?` cannot live inside `format!(...)` here: hoist it out so the
+            // error converts into the stream's error like the `?` below does.
+            let base = self.url("streamGenerateContent")?;
+            let url = format!("{base}?alt=sse");
             let response = self.send(&url, messages).await?;
             let chunks = sse_chunks(response);
             futures::pin_mut!(chunks);
