@@ -11,7 +11,7 @@ use futures::future::BoxFuture;
 use langchain_rust::tools::DuckDuckGoSearchResults;
 
 use crate::http_guard::{
-    read_capped, shared_client, text_capped, validate_endpoint, validate_url, MAX_RESPONSE_BYTES,
+    read_capped, shared_client, text_capped, validate_endpoint, validate_url,
 };
 use crate::{
     AgentError, AgentNode, Assignment, Skill, SkillLibrary, SkillSource, Strategos, StrategosError,
@@ -503,6 +503,7 @@ impl Ronin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http_guard::MAX_RESPONSE_BYTES;
 
     fn block_on<F: std::future::Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
