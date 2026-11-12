@@ -231,7 +231,8 @@ pub fn shared_client() -> Result<reqwest::Client, HttpGuardError> {
                 if redirect_allowed(attempt.previous(), attempt.url()) {
                     attempt.follow()
                 } else {
-                    attempt.error(format!("redirect to {} is not allowed", attempt.url()))
+                    let url = attempt.url().clone();
+                    attempt.error(format!("redirect to {url} is not allowed"))
                 }
             });
             reqwest::Client::builder()
@@ -259,7 +260,7 @@ pub fn push_limited(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), HttpGuardErr
 /// of growing without bound. Needs the `stream` feature of `reqwest`, which
 /// this crate declares in its own `Cargo.toml` (not borrowed from another
 /// crate's feature unification).
-pub async fn read_capped(response: reqwest::Response) -> Result<Vec<u8>, HttpGuardError> {
+pub async fn read_capped(mut response: reqwest::Response) -> Result<Vec<u8>, HttpGuardError> {
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()
