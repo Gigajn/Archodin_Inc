@@ -15,7 +15,7 @@ fn completion(content: &str) -> String {
 
 #[test]
 fn secrets_are_resolved_by_name_and_stored_encrypted() {
-    let vault = Vault::new(KEY);
+    let vault = Vault::new(KEY.into());
     vault.put("groq", "sk-super-secret-123");
     assert_eq!(vault.names(), vec!["groq".to_string()]);
     assert_eq!(
@@ -27,25 +27,44 @@ fn secrets_are_resolved_by_name_and_stored_encrypted() {
         VaultError::UnknownSecret("nope".into())
     );
 
-    let sealed = vault.seal();
+    let sealed = vault.seal().unwrap();
     let text = String::from_utf8_lossy(&sealed);
     assert!(!text.contains("sk-super-secret-123"));
     assert!(text.contains("groq"));
 
-    let reopened = Vault::unseal(KEY, &sealed).unwrap();
+    let reopened = Vault::unseal(KEY.into(), &sealed).unwrap();
     assert_eq!(
         reopened.resolve("groq").unwrap().expose(),
         "sk-super-secret-123"
     );
     assert_eq!(
-        Vault::unseal([8; 32], &sealed).unwrap_err(),
+        Vault::unseal([8; 32].into(), &sealed).unwrap_err(),
         VaultError::Decrypt
     );
 }
 
 #[test]
+fn sealed_envelope_roundtrips_and_rejects_unknown_versions() {
+    let vault = Vault::new(KEY.into());
+    vault.put("model/openai/main", "sk-canary-9f3a2b");
+    let envelope = vault.seal_envelope().unwrap();
+    let reopened = Vault::unseal_envelope(KEY.into(), &envelope).unwrap();
+    assert_eq!(
+        reopened.resolve("model/openai/main").unwrap().expose(),
+        "sk-canary-9f3a2b"
+    );
+    let mut future: serde_json::Value = serde_json::from_slice(&envelope).unwrap();
+    future["version"] = serde_json::json!(99);
+    let future = serde_json::to_vec(&future).unwrap();
+    assert_eq!(
+        Vault::unseal_envelope(KEY.into(), &future).unwrap_err(),
+        VaultError::UnsupportedVersion(99)
+    );
+}
+
+#[test]
 fn secrets_never_show_in_debug_output() {
-    let vault = Vault::new(KEY);
+    let vault = Vault::new(KEY.into());
     vault.put("groq", "sk-super-secret-123");
     let secret = vault.resolve("groq").unwrap();
     assert!(!format!("{secret:?}").contains("sk-super-secret-123"));
@@ -76,7 +95,7 @@ async fn a_chain_step_resolves_its_key_at_call_time_and_rotation_applies_to_runn
         .create_async()
         .await;
 
-    let vault = Vault::new(KEY);
+    let vault = Vault::new(KEY.into());
     vault.put("work", "old-key");
     let provider = Provider::from_vault(server.url(), &vault, "work", "m");
     let agent = AgentNode::new(provider, "Be brief");
@@ -98,7 +117,7 @@ async fn a_missing_secret_falls_back_to_the_next_pair() {
         .with_body(completion("fine"))
         .create_async()
         .await;
-    let vault = Vault::new(KEY);
+    let vault = Vault::new(KEY.into());
     vault.put("second", "good");
     let chain = ModelChain::new(Provider::from_vault(server.url(), &vault, "gone", "m"))
         .then(Provider::from_vault(server.url(), &vault, "second", "m"));

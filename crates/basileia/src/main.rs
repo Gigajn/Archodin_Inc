@@ -9,6 +9,21 @@ use basileia::{assemble, Config, Error};
 
 #[tokio::main]
 async fn main() {
+    // `basileia generate-vault-key` prints base64 of 32 random bytes (ADR
+    // 0021) and exits, WITHOUT reading `Config` — no admin password is
+    // needed to mint a Vault key. The operator stores the output in
+    // `BASILEIA_VAULT_KEY` or a 0600 file read via
+    // `BASILEIA_VAULT_KEY_FILE`.
+    if std::env::args().nth(1).as_deref() == Some("generate-vault-key") {
+        let mut key = zeroize::Zeroizing::new([0u8; 32]);
+        if let Err(error) = getrandom::fill(&mut *key) {
+            eprintln!("basileia: cannot generate a vault key: {error}");
+            std::process::exit(1);
+        }
+        use base64::Engine as _;
+        println!("{}", base64::engine::general_purpose::STANDARD.encode(*key));
+        return;
+    }
     if let Err(error) = run().await {
         eprintln!("basileia: {error}");
         std::process::exit(1);

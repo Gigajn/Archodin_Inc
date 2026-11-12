@@ -1,6 +1,10 @@
 //! A Gemini LLM for langchain-rust's [`LLM`] trait: generateContent chat, function
 //! calling and streaming. [`Provider::gemini`](crate::Provider::gemini) puts it in a
 //! Model chain.
+//!
+//! Gemini already calls through `http_guard::shared_client()` (ADR 0025 §3):
+//! no separate HTTP client is built anywhere in this file, and none may be
+//! added — all egress goes through the one guarded client.
 
 use std::pin::Pin;
 

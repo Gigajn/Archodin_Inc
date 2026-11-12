@@ -352,6 +352,98 @@ async fn claude_is_a_step_in_a_model_chain() {
     mock.assert_async().await;
 }
 
+/// The mock server's URL with its `127.0.0.1` host swapped for `localhost`:
+/// the same server, the same port — only the hostname differs. `localhost`
+/// resolves to loopback, which the guarded client's resolver drops, so a
+/// call through the guard fails where a call on the literal succeeds.
+fn localhost_url(server: &ServerGuard) -> String {
+    let url = server.url();
+    let port = url
+        .rsplit(':')
+        .next()
+        .expect("a mockito URL always carries a port");
+    format!("http://localhost:{port}")
+}
+
+#[tokio::test]
+async fn an_openai_compatible_provider_answers_through_the_guarded_client() {
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/chat/completions")
+        .match_header("authorization", "Bearer sk-canary-openai-guard")
+        .with_header("content-type", "application/json")
+        .with_body(openai_text("guarded compat"))
+        .create_async()
+        .await;
+    let chain = ModelChain::new(Provider::openai_compatible(
+        server.url(),
+        "sk-canary-openai-guard",
+        "m",
+    ));
+    let (graph, _) = graph(chain, vec![]);
+    let out = graph.run(job()).await.unwrap();
+    assert_eq!(out.answer, Some(Ok("guarded compat".into())));
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn an_openai_compatible_provider_refuses_a_localhost_base_url() {
+    let mut server = Server::new_async().await;
+    let _mock = server
+        .mock("POST", "/chat/completions")
+        .match_header("authorization", "Bearer sk-canary-openai-guard")
+        .with_header("content-type", "application/json")
+        .with_body(openai_text("must not arrive"))
+        .create_async()
+        .await;
+    let chain = ModelChain::new(Provider::openai_compatible(
+        localhost_url(&server),
+        "sk-canary-openai-guard",
+        "m",
+    ));
+    let (graph, _) = graph(chain, vec![]);
+    let out = graph.run(job()).await.unwrap();
+    let Some(Err(text)) = out.answer else {
+        panic!(
+            "a localhost base URL must be refused by the guard, got {:?}",
+            out.answer
+        )
+    };
+    assert!(
+        !text.contains("sk-canary-openai-guard"),
+        "the error must not leak the key: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_claude_provider_refuses_a_localhost_base_url() {
+    let mut server = Server::new_async().await;
+    let _mock = server
+        .mock("POST", "/v1/messages")
+        .match_header("x-api-key", "sk-canary-claude-guard")
+        .with_header("content-type", "application/json")
+        .with_body(claude_body("must not arrive"))
+        .create_async()
+        .await;
+    let chain = ModelChain::new(Provider::claude_at(
+        localhost_url(&server),
+        "sk-canary-claude-guard",
+        "fake-claude",
+    ));
+    let (graph, _) = graph(chain, vec![]);
+    let out = graph.run(job()).await.unwrap();
+    let Some(Err(text)) = out.answer else {
+        panic!(
+            "a localhost base URL must be refused by the guard, got {:?}",
+            out.answer
+        )
+    };
+    assert!(
+        !text.contains("sk-canary-claude-guard"),
+        "the error must not leak the key: {text}"
+    );
+}
+
 #[cfg(feature = "ollama")]
 #[tokio::test]
 async fn ollama_is_a_step_in_a_model_chain() {
@@ -367,15 +459,24 @@ async fn ollama_is_a_step_in_a_model_chain() {
         )
         .create_async()
         .await;
-    let chain = ModelChain::new(Provider::ollama(server.url(), "fake-llama"));
+    let chain = ModelChain::new(
+        Provider::ollama(server.url(), "fake-llama").expect("a valid mock Ollama URL builds"),
+    );
     let (graph, _) = graph(chain, vec![]);
     let out = graph.run(job()).await.unwrap();
     assert_eq!(out.answer, Some(Ok("from ollama".into())));
     mock.assert_async().await;
 }
 
+/// `Provider::from_llm` was removed by ADR 0025 §2: a pre-built LLM carries
+/// a credential the Vault never sees, so it cannot be rotated, redacted or
+/// audited. A native Provider is now built only through its own constructor;
+/// the same Claude LLM this test used to wrap by hand is built here through
+/// `Provider::claude_at`, and the wrap-a-pre-built-LLM capability survives
+/// only as the `#[cfg(test)]` helper `from_llm_for_test`, covered by a unit
+/// test inside `native.rs` (integration tests cannot see it).
 #[tokio::test]
-async fn any_langchain_llm_can_be_a_native_provider() {
+async fn a_claude_provider_with_a_custom_model_name_answers() {
     let mut server = Server::new_async().await;
     let _m = server
         .mock("POST", "/v1/messages")
@@ -383,11 +484,8 @@ async fn any_langchain_llm_can_be_a_native_provider() {
         .with_body(claude_body("custom"))
         .create_async()
         .await;
-    let llm = archodin::langchain_rust::llm::Claude::new()
-        .with_api_key("k")
-        .with_base_url(server.url());
     let (graph, _) = graph(
-        ModelChain::new(Provider::from_llm("custom", "claude-ish", llm)),
+        ModelChain::new(Provider::claude_at(server.url(), "k", "claude-ish").account("custom")),
         vec![],
     );
     let out = graph.run(job()).await.unwrap();

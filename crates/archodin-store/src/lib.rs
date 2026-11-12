@@ -137,6 +137,131 @@ pub trait AkashaStore: Send + Sync {
 pub trait CompanyStore: RosterStore + SkillStore + AkashaStore {}
 impl<T: RosterStore + SkillStore + AkashaStore> CompanyStore for T {}
 
+/// Where the sealed vault envelope (ADR 0021) is kept: one row, id 1, in the
+/// `sealed_vault` table (`version`, `sealed` BLOB, `updated_at`). This is
+/// deliberately NOT part of [`CompanyStore`]: the envelope is credential
+/// material, not company data, and only the startup/restore path touches it.
+#[async_trait]
+pub trait SealedVaultStore: Send + Sync {
+    /// Stores `envelope` (bytes from `archodin_graph::Vault::seal_envelope`),
+    /// replacing whatever was stored. The envelope's `version` is read from
+    /// the JSON and stored in the `version` column; bytes that are not a
+    /// versioned envelope are rejected with [`StoreError::Invalid`], so a
+    /// caller can never silently persist the wrong thing.
+    async fn save_sealed_vault(&self, envelope: &[u8]) -> Result<(), StoreError>;
+    /// The stored envelope, or `None` when nothing was saved yet.
+    async fn load_sealed_vault(&self) -> Result<Option<Vec<u8>>, StoreError>;
+}
+
+/// One model account as it is stored (ADR 0023): NON-secret metadata only.
+/// The key NEVER enters this record — it lives in the Vault under
+/// `model/<kind>/<name>`, and this table only says the account exists, what
+/// it speaks, and which model it defaults to.
+///
+/// `budget_tokens` / `budget_cost` are the account's OPTIONAL caps
+/// (ADR 0024 §Budget): `None` means no cap on that side. They are enforced
+/// through [`archodin_graph::UsageMeter`] via the `ModelBudgets` seam
+/// (`archodin-graph/src/model_ops.rs`), never by a second metering system.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelAccountRecord {
+    /// The account name, for example `main` or `groq_cepat`.
+    pub name: String,
+    /// The kind spelling: `openai_compatible`, `gemini`, `claude`, `ollama`.
+    pub kind: String,
+    /// The API root, for example `https://api.openai.com/v1`.
+    pub base_url: String,
+    /// The model used when a chain names this account without a model of
+    /// its own. May be empty when the model is set per Role instead.
+    pub default_model: String,
+    /// The most tokens the account may spend (`None` = no cap).
+    pub budget_tokens: Option<i64>,
+    /// The most money the account may spend (`None` = no cap).
+    pub budget_cost: Option<f64>,
+}
+
+/// Where model-account metadata (ADR 0023) is kept, in the `model_accounts`
+/// table (`name TEXT PRIMARY KEY, kind TEXT NOT NULL, base_url TEXT NOT
+/// NULL, default_model TEXT NOT NULL, budget_tokens BIGINT,
+/// budget_cost REAL`). Deliberately NOT part of
+/// [`CompanyStore`]: like the sealed vault, this is credential-adjacent
+/// configuration, touched only by the startup/restore path and the Agora
+/// model API — and the key is never in this table, by construction.
+#[async_trait]
+pub trait ModelAccountStore: Send + Sync {
+    /// Stores `account`, replacing any account with the same name.
+    async fn save_model_account(&self, account: &ModelAccountRecord) -> Result<(), StoreError>;
+    /// Every stored account, ordered by name.
+    async fn load_model_accounts(&self) -> Result<Vec<ModelAccountRecord>, StoreError>;
+    /// Forgets the account called `name`; succeeds when there was none.
+    async fn remove_model_account(&self, name: &str) -> Result<(), StoreError>;
+}
+
+/// One row of the append-only audit log (ADR 0024): a key-lifecycle event
+/// or an auth failure. This record NEVER holds a key value, part of one,
+/// or a raw upstream error body — every free-text field (`result`) is
+/// passed through `Vault::redact` before it is recorded (see
+/// `archodin-graph/src/model_ops.rs`, `AuditEvent`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelAuditRecord {
+    /// Row number, assigned by the store; pass 0 when recording.
+    pub seq: i64,
+    /// When the event happened (seconds since the Unix epoch).
+    pub at: i64,
+    /// Who did it (`"admin"` in v1 — see `AUDIT_ACTOR`).
+    pub actor: String,
+    /// `provision` | `rotate` | `revoke` | `health_check` | `auth_failed`
+    /// | `call_failed`.
+    pub action: String,
+    /// Provider kind spelling (`openai_compatible`, ...).
+    pub kind: String,
+    /// Account name.
+    pub account: String,
+    /// Default model name of the account (may be empty).
+    pub model: String,
+    /// Outcome, already redacted: `ok`, `auth_failed`, `unreachable`,
+    /// `key_missing`, `not_persisted: <reason>`, `persist_failed: <reason>`.
+    pub result: String,
+}
+
+/// Where the model audit log (ADR 0024) is kept, in the `model_audit`
+/// table. Append-only: rows are never updated or deleted through this
+/// trait. Deliberately NOT part of [`CompanyStore`]: like the sealed
+/// vault, this is credential-adjacent data, touched only by the Agora
+/// model API. Follows the `SealedVaultStore` pattern (a separate trait,
+/// implemented by both backends).
+#[async_trait]
+pub trait ModelAuditStore: Send + Sync {
+    /// Appends `record` (its `seq` is assigned by the store).
+    async fn record_audit(&self, record: &ModelAuditRecord) -> Result<(), StoreError>;
+    /// The newest events first, at most `limit` rows.
+    async fn list_audit(&self, limit: usize) -> Result<Vec<ModelAuditRecord>, StoreError>;
+}
+
+/// Everything the Agora model API persists through one handle: account
+/// metadata, the sealed vault envelope, and the audit log. Rust trait
+/// objects allow only one non-auto trait, so this combined trait is the
+/// single object type (`Arc<dyn ModelStore>`) the console holds; both
+/// backends implement all three parts, so the blanket impl covers them.
+pub trait ModelStore: ModelAccountStore + SealedVaultStore + ModelAuditStore {}
+impl<T: ModelAccountStore + SealedVaultStore + ModelAuditStore> ModelStore for T {}
+
+/// The `version` field of a sealed-vault envelope, for the `version` column
+/// of the `sealed_vault` table. Only the shape is checked here (a JSON object
+/// with a numeric `version`); whether that version is understood is decided
+/// when the envelope is opened, not when it is stored.
+pub(crate) fn sealed_envelope_version(envelope: &[u8]) -> Result<i64, StoreError> {
+    let value: serde_json::Value = serde_json::from_slice(envelope).map_err(|_| {
+        StoreError::Invalid("sealed vault bytes are not a versioned envelope".to_string())
+    })?;
+    value
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| i64::try_from(v).ok())
+        .ok_or_else(|| {
+            StoreError::Invalid("sealed vault envelope has no numeric `version`".to_string())
+        })
+}
+
 /// Makes the store match `roster`: every Role is stored, Agents that left are
 /// forgotten and new Agents are added after the existing ones.
 pub async fn save_roster(store: &dyn RosterStore, roster: &Roster) -> Result<(), StoreError> {

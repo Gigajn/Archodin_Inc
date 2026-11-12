@@ -19,7 +19,7 @@ async fn get(app: &Router, uri: &str) -> StatusCode {
 }
 
 fn auth() -> Auth {
-    let vault = Vault::new([9; 32]);
+    let vault = Vault::new([9; 32].into());
     vault.put("agora/username", "kudo");
     vault.put(
         "agora/password_hash",

@@ -16,7 +16,7 @@ use tower::ServiceExt;
 const PASSWORD: &str = "correct horse battery staple";
 
 fn auth() -> Auth {
-    let vault = Vault::new([9; 32]);
+    let vault = Vault::new([9; 32].into());
     vault.put("agora/username", "kudo");
     vault.put("agora/password_hash", &hash_password(PASSWORD));
     Auth::from_vault(&vault, "agora/username", "agora/password_hash").unwrap()
@@ -228,7 +228,7 @@ async fn sessions_expire() {
 
 #[test]
 fn the_vault_must_hold_the_login() {
-    let vault = Vault::new([1; 32]);
+    let vault = Vault::new([1; 32].into());
     assert!(Auth::from_vault(&vault, "u", "h").is_err());
     vault.put("u", "kudo");
     vault.put("h", "not a password hash");

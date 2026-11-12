@@ -11,7 +11,7 @@ description = "Basileia: the proprietary application that assembles Agora, the G
 
 [dependencies]
 archodin-console = { path = "../archodin-console" }
-archodin-graph = { path = "../archodin-graph" }
+archodin-graph = { path = "../archodin-graph", features = ["ollama"] }
 archodin-store = { path = "../archodin-store" }
 axum = "0.8"
 futures = "0.3.31"
@@ -19,6 +19,15 @@ futures = "0.3.31"
 # randomness dependency exists in the workspace, so `getrandom` is added
 # directly instead of borrowing a transitive re-export.
 getrandom = "0.3"
+# Base64 for `BASILEIA_VAULT_KEY` and `generate-vault-key` (MIT OR Apache-2.0).
+base64 = "0.22"
+# `Zeroizing<[u8; 32]>` for the Vault key (MIT OR Apache-2.0).
+zeroize = "1.9.1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+# Oneshot requests against the assembled router in tests (MIT OR Apache-2.0).
+tower = { version = "0.5", features = ["util"] }

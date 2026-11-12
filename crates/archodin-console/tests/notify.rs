@@ -19,7 +19,7 @@ use tower::ServiceExt;
 const TOKEN: &str = "123:SECRET-BOT-TOKEN";
 
 fn vault() -> Vault {
-    let vault = Vault::new([5; 32]);
+    let vault = Vault::new([5; 32].into());
     vault.put("telegram/bot_token", TOKEN);
     vault
 }
@@ -133,7 +133,7 @@ async fn a_missing_vault_secret_is_an_error_not_a_request() {
         .expect(0)
         .create_async()
         .await;
-    let notifier = TelegramNotifier::new(Vault::new([5; 32]), "telegram/bot_token", "1")
+    let notifier = TelegramNotifier::new(Vault::new([5; 32].into()), "telegram/bot_token", "1")
         .api_base(server.url());
     let agora = agora_with(notifier, 10);
     agora.decide(&request("hire", "Hire a Scout")).await;
@@ -182,7 +182,7 @@ async fn every_configured_notifier_gets_it_and_one_failing_does_not_block_the_ot
         .runner(|_| Box::pin(async {}))
         .public_url("https://agora.test")
         .notifier(Arc::new(TelegramNotifier::new(
-            Vault::new([0; 32]),
+            Vault::new([0; 32].into()),
             "missing",
             "1",
         )))
@@ -201,7 +201,7 @@ async fn every_configured_notifier_gets_it_and_one_failing_does_not_block_the_ot
 
 #[tokio::test]
 async fn the_link_in_the_message_opens_behind_the_login() {
-    let vault = Vault::new([5; 32]);
+    let vault = Vault::new([5; 32].into());
     vault.put("u", "kudo");
     vault.put("h", &hash_password("pw"));
     let mailer = FakeMailer::default();

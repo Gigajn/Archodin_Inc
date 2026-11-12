@@ -16,4 +16,4 @@ pub mod assembly;
 pub mod config;
 
 pub use assembly::{assemble, App, CompanyState, Error};
-pub use config::{Config, ConfigError, DbConfig};
+pub use config::{Config, ConfigError, DbConfig, ModelAccountConfig};

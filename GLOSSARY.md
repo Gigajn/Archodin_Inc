@@ -58,6 +58,71 @@ _Avoid_: Backend, vendor, model
 The ordered list of Provider account and model pairs an Agent uses: the first one normally, the next ones only on an error, a rate limit or a timeout. Set per Role, overridable per Agent.
 _Avoid_: Fallback list, routing table, combo
 
+## Model Auth
+
+**KeySource**:
+Dari mana kunci sebuah Provider berasal saat dipakai: `Fixed` (nilai yang
+dipegang langsung, hanya untuk test dan bootstrap sesaat) atau `Vault`
+(nama secret di Vault, di-resolve tiap call sehingga rotasi langsung
+berlaku tanpa restart).
+_Avoid_: API key, credential
+
+**Vault**:
+Tempat kunci hidup di dalam proses: semua nilai dienkripsi ChaCha20-Poly1305
+dengan satu kunci Vault, hanya nama secret yang terlihat. `Debug`-nya hanya
+menampilkan nama; `redact` mengganti nilai yang dikenal dengan `[redacted]`
+sebelum teks mencapai log, error, atau Briefing.
+_Avoid_: Key store, secret manager
+
+**Sealed vault**:
+Vault yang ditulis ke disk (satu baris di SQLite) sebagai blob terenkripsi
+berversi, agar akun model dari Agora selamat dari restart. Hanya bisa
+dibuka dengan kunci Vault yang sama.
+_Avoid_: Backup kunci, encrypted file
+
+**Kunci Vault**:
+Satu kunci 32-byte yang mengenkripsi seluruh Vault; datang dari env
+(`BASILEIA_VAULT_KEY` atau file 0600), tidak pernah di-log, tidak pernah
+masuk DB, dan dihapus dari memori (di-zeroize) setelah dipakai.
+_Avoid_: Master password, passphrase
+
+**Model Registry**:
+Satu-satunya tempat pilihan model hidup: akun model (kind, base URL, model
+default, referensi kunci) dan model chain per Role dengan override per
+Agen. Nama akun dan model bukan rahasia; kunci tidak pernah masuk Registry.
+_Avoid_: Katalog model, routing table
+
+**Akun model**:
+Satu kredensial untuk satu provider: kind (`openai_compatible`, `gemini`,
+`claude`, `ollama`), base URL, model default, dan satu nama secret di Vault.
+Satu provider boleh punya beberapa akun.
+_Avoid_: Provider account, koneksi
+
+**Provisioning**:
+Cara kunci masuk ke server: env var saat startup (bootstrap) atau API Agora
+(admin, tanpa restart). Kunci hanya masuk lewat dua jalan ini — tidak lewat
+Skill, Job, atau jawaban model.
+_Avoid_: Setup kunci, import kunci
+
+**Health check**:
+Tes on-demand bahwa satu akun model benar-benar bisa dipakai: memanggil
+endpoint daftar model provider (`GET /v1/models` atau setaranya) lewat
+guarded client, tanpa memanggil inference. Hasilnya status, bukan janji.
+_Avoid_: Ping, tes koneksi
+
+**Rotasi**:
+Mengganti nilai kunci sebuah akun dengan kunci baru (di vendor dulu, lalu
+di Agora), tanpa restart: call berikutnya memakai kunci baru. Satu nama,
+satu nilai — tidak ada masa tenggang dua kunci aktif.
+_Avoid_: Ganti kunci, refresh kunci
+
+**Revoke**:
+Mencabut pemakaian kunci di server (hapus dari Vault + tandai akun
+dicabut) sehingga call baru gagal dengan error yang jelas. Revoke di server
+tidak mematikan kunci di sisi vendor — itu tetap harus dilakukan operator
+di dashboard provider.
+_Avoid_: Hapus kunci, nonaktifkan kunci
+
 ## Orchestration
 
 **Graph**:

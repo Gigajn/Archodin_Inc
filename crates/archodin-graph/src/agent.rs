@@ -19,6 +19,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::chain::{ChainEvent, ModelChain, ModelPair};
+use crate::http_guard::validate_endpoint;
+use crate::registry::{ModelError, ModelKind};
 use crate::GraphBuilder;
 
 /// The most model round trips one Agent run may take before it gives up.
@@ -26,6 +28,12 @@ const MAX_ROUNDS: usize = 10;
 
 /// An OpenAI-compatible Provider account and model: 9router, OpenRouter, Groq,
 /// LM Studio and vLLM are all reached by base URL, API key and model name.
+///
+/// NOT serializable — deliberately (ADR 0025 §4). A `Provider` holds a key
+/// (`KeySource`), so it must never enter a Store, a Checkpoint, Job state,
+/// a Briefing or an Akasha: only the account/model NAME travels there, and a
+/// fresh Provider is built from the Registry + Vault when one is needed.
+/// Do NOT add `Serialize`/`Deserialize` to this struct.
 #[derive(Debug, Clone)]
 pub struct Provider {
     base_url: String,
@@ -35,10 +43,23 @@ pub struct Provider {
     pricing: Option<crate::Pricing>,
     /// Set for Providers with their own API (see `native.rs`).
     native: Option<crate::native::Native>,
+    /// The Registry kind, when the constructor knew it; `None` for a native
+    /// Provider whose constructor has not recorded one yet.
+    kind: Option<ModelKind>,
+    /// Whether a call needs a key at all: false only for Ollama, which has
+    /// no auth. Every other kind refuses an empty key in [`Provider::validate`].
+    key_required: bool,
 }
 
 impl Provider {
     /// `base_url` is the API root, for example `http://localhost:1234/v1`.
+    ///
+    /// This constructor does NOT validate: an empty or unparsable base URL,
+    /// an empty model, or an empty key all build fine here, exactly as
+    /// before. Validation lives in [`Provider::try_openai_compatible`] and
+    /// in [`Provider::validate`], and the Registry calls `validate` when an
+    /// account is registered — so an invalid Provider never serves a Job
+    /// through the Registry path.
     pub fn openai_compatible(
         base_url: impl Into<String>,
         api_key: impl Into<String>,
@@ -51,7 +72,82 @@ impl Provider {
             account: None,
             pricing: None,
             native: None,
+            kind: Some(ModelKind::OpenAiCompatible),
+            key_required: true,
         }
+    }
+
+    /// Like [`Provider::openai_compatible`], but refuses a Provider that
+    /// could not serve a call: an empty or invalid base URL, an empty model
+    /// name, or an empty key. The error names the kind, account and model —
+    /// never the key.
+    pub fn try_openai_compatible(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Result<Self, ModelError> {
+        let provider = Self::openai_compatible(base_url, api_key, model);
+        provider.validate()?;
+        Ok(provider)
+    }
+
+    /// Shape validation, no network: the base URL must pass
+    /// `http_guard::validate_endpoint`, the model name must not be empty,
+    /// and — unless this Provider needs no key (Ollama) — the key must not
+    /// be empty (a `Fixed("")` key, or a Vault secret with an empty name).
+    /// A Vault key is checked by NAME only: whether the Vault actually holds
+    /// it is a runtime lookup, not a shape question.
+    pub fn validate(&self) -> Result<(), ModelError> {
+        // The kind is only a label in the error; a Provider built before its
+        // kind was recorded reports as `openai_compatible` rather than
+        // failing validation for want of a label.
+        let kind = self.kind.unwrap_or(ModelKind::OpenAiCompatible);
+        let account = self
+            .account
+            .clone()
+            .unwrap_or_else(|| self.base_url.clone());
+        if let Err(e) = validate_endpoint(&self.base_url) {
+            return Err(ModelError::invalid(
+                kind,
+                &account,
+                &self.model,
+                format!("base URL refused: {e}"),
+            ));
+        }
+        if self.model.is_empty() {
+            return Err(ModelError::invalid(
+                kind,
+                &account,
+                &self.model,
+                "the model name must not be empty",
+            ));
+        }
+        if self.key_required {
+            let key_missing = match &self.api_key {
+                KeySource::Fixed(key) => key.is_empty(),
+                KeySource::Vault(_, name) => name.is_empty(),
+            };
+            if key_missing {
+                return Err(ModelError::key_missing(kind, &account, &self.model));
+            }
+        }
+        Ok(())
+    }
+
+    /// Records the Registry kind of a Provider built through `with_native`
+    /// (Gemini, Claude, Ollama), so `validate` and error mapping name it.
+    pub(crate) fn set_kind(mut self, kind: ModelKind) -> Self {
+        self.kind = Some(kind);
+        self
+    }
+
+    /// Marks a Provider as needing no key (Ollama only): `validate` then
+    /// accepts an empty key. Only the Ollama constructor calls this, so it
+    /// exists only when the `ollama` feature is on.
+    #[cfg(feature = "ollama")]
+    pub(crate) fn no_key_required(mut self) -> Self {
+        self.key_required = false;
+        self
     }
 
     /// A Provider reached through its own API: `build` makes the LLM from the API key.
@@ -68,6 +164,11 @@ impl Provider {
             account: None,
             pricing: None,
             native: Some(native),
+            // The kind is recorded by the native constructor that knows it
+            // (`set_kind`); a constructor that never calls it leaves `None`
+            // and `validate` falls back to the `openai_compatible` label.
+            kind: None,
+            key_required: true,
         }
     }
 
@@ -146,12 +247,19 @@ impl Provider {
         let config = OpenAIConfig::new()
             .with_api_base(&self.base_url)
             .with_api_key(key);
+        // Every OpenAI-compatible call goes through the guarded client
+        // (ADR 0025 §3): 30 s timeout, 2 MiB cap, http-acl SSRF filtering.
+        // A client that cannot be built is an error, never a silent
+        // fallback to an unguarded client — and the message names no key.
+        let guarded = crate::http_guard::shared_client()
+            .map_err(|e| format!("could not build the guarded HTTP client: {e}"))?;
         let mut options = CallOptions::default();
         if !tools.is_empty() {
             options = options.with_functions(definitions(tools));
         }
         Ok(Box::new(
             OpenAI::new(config)
+                .with_http_client(guarded)
                 .with_model(self.model.clone())
                 .with_options(options),
         ))
@@ -165,6 +273,14 @@ fn definitions(tools: &[AgentTool]) -> Vec<FunctionDefinition> {
         .collect()
 }
 
+/// Where a Provider's key comes from: held directly (`Fixed`, test and
+/// short-lived bootstrap only) or looked up in the Vault by name at every
+/// call (`Vault`, so rotation applies without a restart).
+///
+/// NOT serializable — deliberately (ADR 0025 §4), like [`Provider`]: a
+/// `KeySource` carries or names a key, so it must never enter a Store, a
+/// Checkpoint, Job state, a Briefing or an Akasha. Do NOT add
+/// `Serialize`/`Deserialize` to this enum. Its `Debug` never prints a value.
 #[derive(Clone)]
 pub(crate) enum KeySource {
     Fixed(String),
@@ -296,6 +412,18 @@ pub enum AgentError {
     /// The model kept asking for Tools without answering.
     #[error("the agent did not answer within {0} rounds")]
     TooManyRounds(usize),
+}
+
+impl From<ModelError> for AgentError {
+    /// The boundary mapping (ADR 0023 §4): a typed model error becomes the
+    /// Provider error an Agent reports. This is safe by construction —
+    /// `ModelError`'s `Display` is built only from kind, account and model
+    /// names, never from a key value or a raw upstream body — so no secret
+    /// can cross here. The chain/fallback behaviour is unchanged: this only
+    /// gives typed errors a typed way in.
+    fn from(error: ModelError) -> Self {
+        AgentError::Provider(error.to_string())
+    }
 }
 
 /// An Agent that can run as a Node: instructions, Tools and a Provider.
@@ -457,12 +585,97 @@ mod tests {
 
     #[test]
     fn a_vault_key_is_redacted_from_error_text() {
-        let vault = crate::Vault::new([7; 32]);
+        let vault = crate::Vault::new([7; 32].into());
         vault.put("work", "sk-vault-secret");
         let provider = Provider::from_vault("http://localhost:9/v1", &vault, "work", "m");
         assert_eq!(
             provider.redact("bad key sk-vault-secret".to_string()),
             "bad key [redacted]"
         );
+    }
+
+    #[test]
+    fn try_openai_compatible_accepts_a_well_shaped_provider() {
+        let provider =
+            Provider::try_openai_compatible("http://localhost:9/v1", "sk-key", "m").unwrap();
+        assert!(provider.validate().is_ok());
+        // A Vault-backed Provider validates by secret NAME, not by whether
+        // the Vault holds it — that is a runtime lookup, not shape.
+        let vault = crate::Vault::new([7; 32].into());
+        assert!(
+            Provider::from_vault("http://localhost:9/v1", &vault, "work", "m")
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn try_openai_compatible_refuses_bad_shapes() {
+        assert!(matches!(
+            Provider::try_openai_compatible("", "sk-key", "m").unwrap_err(),
+            ModelError::ModelNotConfigured { .. }
+        ));
+        assert!(matches!(
+            Provider::try_openai_compatible("not a url", "sk-key", "m").unwrap_err(),
+            ModelError::ModelNotConfigured { .. }
+        ));
+        assert!(matches!(
+            Provider::try_openai_compatible("http://localhost:9/v1", "sk-key", "").unwrap_err(),
+            ModelError::ModelNotConfigured { .. }
+        ));
+        assert_eq!(
+            Provider::try_openai_compatible("http://localhost:9/v1", "", "m").unwrap_err(),
+            ModelError::key_missing(ModelKind::OpenAiCompatible, "http://localhost:9/v1", "m")
+        );
+    }
+
+    #[test]
+    fn the_legacy_constructor_still_builds_without_validating() {
+        // Deliberate: `openai_compatible` keeps its old behaviour so
+        // existing call sites keep compiling; validation is opt-in via
+        // `try_openai_compatible` / `validate` and mandatory in the Registry.
+        let provider = Provider::openai_compatible("", "", "");
+        assert!(provider.validate().is_err());
+    }
+
+    #[test]
+    fn a_model_error_becomes_the_agent_provider_error() {
+        let typed = ModelError::auth_failed(ModelKind::Claude, "work", "m1");
+        let agent: AgentError = typed.into();
+        assert_eq!(
+            agent,
+            AgentError::Provider(
+                "the claude provider refused the key for account `work` (model `m1`)".into()
+            )
+        );
+    }
+
+    /// A canary key must never surface in `Debug`, in a validation error,
+    /// or in the `AgentError` it maps to (ADR 0025 §1).
+    #[test]
+    fn a_canary_key_never_appears_in_debug_or_error_text() {
+        let canary = format!(
+            "sk-canary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the clock runs forward")
+                .as_nanos()
+        );
+        // A valid Provider built with the canary: its Debug hides the value.
+        let provider =
+            Provider::openai_compatible("http://localhost:9/v1", &canary, "m").account("work");
+        assert!(!format!("{provider:?}").contains(&canary));
+        // An invalid Provider built with the canary: the error names the
+        // account and model, never the key.
+        let err = Provider::try_openai_compatible("", &canary, "m").unwrap_err();
+        assert!(!err.to_string().contains(&canary));
+        assert!(!format!("{err:?}").contains(&canary));
+        let agent_err: AgentError = err.into();
+        assert!(!agent_err.to_string().contains(&canary));
+        // And `redact` scrubs the canary out of arbitrary error text.
+        assert!(!provider
+            .redact(format!("provider error: bad key {canary}"))
+            .contains(&canary));
     }
 }

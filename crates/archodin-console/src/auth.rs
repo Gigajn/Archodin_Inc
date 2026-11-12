@@ -419,7 +419,7 @@ mod tests {
     use super::*;
 
     fn auth_with(base: Duration, max: Duration) -> Auth {
-        let vault = Vault::new([0; 32]);
+        let vault = Vault::new([0; 32].into());
         vault.put("u", "kudo");
         vault.put("h", &hash_password("pw"));
         Auth::from_vault(&vault, "u", "h")

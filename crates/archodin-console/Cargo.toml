@@ -8,6 +8,9 @@ description = "The Agora: Archodin's web console for submitting Jobs, following 
 
 [dependencies]
 archodin-graph = { path = "../archodin-graph" }
+# Model-account metadata, the sealed vault and the audit log (Fase 3b-D):
+# the handlers persist through these traits, never through SQL directly.
+archodin-store = { path = "../archodin-store" }
 argon2 = "0.5"
 axum = "0.8"
 futures = "0.3.31"

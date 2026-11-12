@@ -17,7 +17,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::any::AnyPoolOptions;
 use sqlx::{AnyPool, Row};
 
-use crate::{tidy_fact, AgentRecord, AkashaStore, RoleRecord, RosterStore, SkillStore, StoreError};
+use crate::{
+    sealed_envelope_version, tidy_fact, AgentRecord, AkashaStore, ModelAccountRecord,
+    ModelAccountStore, ModelAuditRecord, ModelAuditStore, RoleRecord, RosterStore,
+    SealedVaultStore, SkillStore, StoreError,
+};
 
 const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS checkpoints (
@@ -43,6 +47,28 @@ const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS akasha (
         role TEXT NOT NULL, fact_key TEXT NOT NULL, seq BIGINT NOT NULL, fact TEXT NOT NULL,
         PRIMARY KEY (role, fact_key))",
+    // The sealed vault envelope (ADR 0021): one row, id always 1. The schema
+    // version stays 1 on purpose: this statement runs on every `connect`
+    // (`CREATE TABLE IF NOT EXISTS`), so existing databases gain the table
+    // without a migration, and bumping the version would reject them.
+    "CREATE TABLE IF NOT EXISTS sealed_vault (
+        id BIGINT PRIMARY KEY, version BIGINT NOT NULL,
+        sealed BYTEA NOT NULL, updated_at BIGINT NOT NULL)",
+    // Model-account metadata (ADR 0023): NON-secret only — the key NEVER
+    // enters this table. TEXT throughout, so the same statement serves
+    // SQLite and Postgres; no BLOB column. `budget_tokens` / `budget_cost`
+    // are the account's optional caps (ADR 0024 §Budget).
+    "CREATE TABLE IF NOT EXISTS model_accounts (
+        name TEXT PRIMARY KEY, kind TEXT NOT NULL,
+        base_url TEXT NOT NULL, default_model TEXT NOT NULL,
+        budget_tokens BIGINT, budget_cost REAL)",
+    // The model audit log (ADR 0024): append-only, newest first by `seq`.
+    // No key value, no part of one, no raw upstream body ever lands here
+    // — the writer redacts `result` before recording.
+    "CREATE TABLE IF NOT EXISTS model_audit (
+        seq BIGINT PRIMARY KEY, at BIGINT NOT NULL,
+        actor TEXT NOT NULL, action TEXT NOT NULL, kind TEXT NOT NULL,
+        account TEXT NOT NULL, model TEXT NOT NULL, result TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS schema_meta (
         key TEXT PRIMARY KEY, value TEXT NOT NULL)",
 ];
@@ -84,6 +110,21 @@ impl SqlStore {
                 .execute(&pool)
                 .await
                 .map_err(backend)?;
+        }
+        // Best-effort migration for databases created before the budget
+        // columns existed (Fase 3b-D): `CREATE TABLE IF NOT EXISTS` above
+        // does not add columns to an existing table. Neither SQLite nor
+        // Postgres spells "add if missing" the same way, so the plain
+        // `ALTER TABLE` is run and its error ignored — on a database that
+        // already has the column the only failure is "duplicate column",
+        // and on a fresh database the column came from `CREATE TABLE`.
+        // A failure here therefore never hides a real problem: the next
+        // write to the column would fail loudly instead.
+        for alter in [
+            "ALTER TABLE model_accounts ADD COLUMN budget_tokens BIGINT",
+            "ALTER TABLE model_accounts ADD COLUMN budget_cost REAL",
+        ] {
+            let _ = sqlx::query(alter).execute(&pool).await;
         }
         // Stamp the version on fresh databases; refuse a database whose schema
         // this build does not understand instead of reading it as if it did.
@@ -530,6 +571,153 @@ impl AkashaStore for SqlStore {
             .map_err(backend)?;
         rows.iter()
             .map(|r| r.try_get("role").map_err(backend))
+            .collect()
+    }
+}
+
+/// Seconds since the Unix epoch, for the `updated_at` column. Never fails:
+/// a clock before the epoch stamps 0 rather than failing the save.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64
+}
+
+#[async_trait]
+impl SealedVaultStore for SqlStore {
+    async fn save_sealed_vault(&self, envelope: &[u8]) -> Result<(), StoreError> {
+        let version = sealed_envelope_version(envelope)?;
+        sqlx::query(
+            "INSERT INTO sealed_vault (id, version, sealed, updated_at) VALUES (1, $1, $2, $3)
+             ON CONFLICT (id) DO UPDATE SET version = excluded.version,
+                sealed = excluded.sealed, updated_at = excluded.updated_at",
+        )
+        .bind(version)
+        .bind(envelope)
+        .bind(unix_now())
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn load_sealed_vault(&self) -> Result<Option<Vec<u8>>, StoreError> {
+        let row = sqlx::query("SELECT sealed FROM sealed_vault WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(backend)?;
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some(r.try_get("sealed").map_err(backend)?)),
+        }
+    }
+}
+
+#[async_trait]
+impl ModelAccountStore for SqlStore {
+    async fn save_model_account(&self, account: &ModelAccountRecord) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO model_accounts (name, kind, base_url, default_model, budget_tokens, budget_cost)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (name) DO UPDATE SET kind = excluded.kind,
+                base_url = excluded.base_url, default_model = excluded.default_model,
+                budget_tokens = excluded.budget_tokens, budget_cost = excluded.budget_cost",
+        )
+        .bind(&account.name)
+        .bind(&account.kind)
+        .bind(&account.base_url)
+        .bind(&account.default_model)
+        .bind(account.budget_tokens)
+        .bind(account.budget_cost)
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn load_model_accounts(&self) -> Result<Vec<ModelAccountRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT name, kind, base_url, default_model, budget_tokens, budget_cost
+             FROM model_accounts ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        rows.iter()
+            .map(|r| {
+                Ok(ModelAccountRecord {
+                    name: r.try_get("name").map_err(backend)?,
+                    kind: r.try_get("kind").map_err(backend)?,
+                    base_url: r.try_get("base_url").map_err(backend)?,
+                    default_model: r.try_get("default_model").map_err(backend)?,
+                    budget_tokens: r.try_get("budget_tokens").map_err(backend)?,
+                    budget_cost: r.try_get("budget_cost").map_err(backend)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn remove_model_account(&self, name: &str) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM model_accounts WHERE name = $1")
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ModelAuditStore for SqlStore {
+    async fn record_audit(&self, record: &ModelAuditRecord) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        let last: Option<i64> = sqlx::query("SELECT MAX(seq) AS last FROM model_audit")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(backend)?
+            .try_get("last")
+            .map_err(backend)?;
+        sqlx::query(
+            "INSERT INTO model_audit (seq, at, actor, action, kind, account, model, result)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(last.unwrap_or(0) + 1)
+        .bind(record.at)
+        .bind(&record.actor)
+        .bind(&record.action)
+        .bind(&record.kind)
+        .bind(&record.account)
+        .bind(&record.model)
+        .bind(&record.result)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)
+    }
+
+    async fn list_audit(&self, limit: usize) -> Result<Vec<ModelAuditRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT seq, at, actor, action, kind, account, model, result
+             FROM model_audit ORDER BY seq DESC LIMIT $1",
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        rows.iter()
+            .map(|r| {
+                Ok(ModelAuditRecord {
+                    seq: r.try_get("seq").map_err(backend)?,
+                    at: r.try_get("at").map_err(backend)?,
+                    actor: r.try_get("actor").map_err(backend)?,
+                    action: r.try_get("action").map_err(backend)?,
+                    kind: r.try_get("kind").map_err(backend)?,
+                    account: r.try_get("account").map_err(backend)?,
+                    model: r.try_get("model").map_err(backend)?,
+                    result: r.try_get("result").map_err(backend)?,
+                })
+            })
             .collect()
     }
 }
