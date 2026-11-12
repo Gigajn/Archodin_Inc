@@ -36,7 +36,7 @@ pub struct Config {
 }
 
 impl std::fmt::Debug for Config {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
             .field("bind", &self.bind)
             .field("db", &self.db)

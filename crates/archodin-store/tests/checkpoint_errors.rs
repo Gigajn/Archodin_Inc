@@ -80,8 +80,11 @@ async fn sql_store_checkpoints_returns_err_on_corrupt_row() {
     .unwrap();
     drop(pool);
 
-    let err = store
-        .checkpoints("job-1")
+    // The row is corrupt JSON, so deserializing it as any State fails;
+    // `u32` is enough to pin the generic — the failure is in the data,
+    // not the type. `S` lives on the `CheckpointStore` trait, not on the
+    // method, so it is pinned with fully-qualified syntax.
+    let err = CheckpointStore::<u32>::checkpoints(&store, "job-1")
         .await
         .expect_err("checkpoints over corrupt data must return Err, not panic");
     assert!(matches!(err, StoreError::Invalid(_)));
@@ -102,7 +105,7 @@ async fn memory_store_save_and_checkpoints_round_trip() {
         })
         .await
         .unwrap();
-    let saved = store.checkpoints("job-1").await.unwrap();
+    let saved: Vec<Checkpoint<u32>> = store.checkpoints("job-1").await.unwrap();
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].step, 0);
     assert_eq!(saved[0].state, 41);

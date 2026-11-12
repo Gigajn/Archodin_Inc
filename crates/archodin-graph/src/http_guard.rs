@@ -108,7 +108,11 @@ fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
     }
     // An IPv4-mapped (`::ffff:127.0.0.1`) or IPv4-compatible (`::127.0.0.1`)
     // address is judged by the IPv4 it carries.
-    if s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0
+    if s[0] == 0
+        && s[1] == 0
+        && s[2] == 0
+        && s[3] == 0
+        && s[4] == 0
         && (s[5] == 0 || s[5] == 0xffff)
     {
         let v4 = Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
@@ -142,9 +146,9 @@ pub fn validate_endpoint(raw: &str) -> Result<Url, HttpGuardError> {
             "only http(s) endpoints are allowed",
         ));
     }
-    let host = url.host_str().ok_or_else(|| {
-        HttpGuardError::BlockedUrl(raw.to_string(), "endpoint has no host")
-    })?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| HttpGuardError::BlockedUrl(raw.to_string(), "endpoint has no host"))?;
     if host.is_empty() {
         return Err(HttpGuardError::BlockedUrl(
             raw.to_string(),
@@ -158,6 +162,20 @@ pub fn validate_endpoint(raw: &str) -> Result<Url, HttpGuardError> {
         ));
     }
     Ok(url)
+}
+
+/// Whether two URLs share an origin (scheme, host, port): the same service.
+/// A hit URL on the same origin as the operator-configured search endpoint
+/// is served by the operator's own service, so it may use the operator
+/// check; a hit on any other origin is attacker-influenced and stays strict.
+/// Unparseable URLs are never the same origin.
+pub fn same_origin(a: &str, b: &str) -> bool {
+    let (Ok(a), Ok(b)) = (Url::parse(a.trim()), Url::parse(b.trim())) else {
+        return false;
+    };
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
 }
 
 fn parse(raw: &str) -> Result<Url, HttpGuardError> {
@@ -182,7 +200,11 @@ fn check_host(url: &Url, raw: &str) -> Result<(), HttpGuardError> {
             "localhost hosts are not allowed",
         ));
     }
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // `host_str()` keeps the brackets on an IPv6 literal (`[::1]`), and
+    // `IpAddr` does not parse brackets, so strip them before the check;
+    // without this, every IPv6 literal silently skipped the block list.
+    let host_ip = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = host_ip.parse::<IpAddr>() {
         if is_blocked_ip(ip) {
             return Err(HttpGuardError::BlockedUrl(
                 raw.to_string(),
@@ -387,10 +409,7 @@ mod tests {
             "not a url",
         ] {
             assert!(
-                matches!(
-                    validate_endpoint(raw),
-                    Err(HttpGuardError::BlockedUrl(..))
-                ),
+                matches!(validate_endpoint(raw), Err(HttpGuardError::BlockedUrl(..))),
                 "{raw} must be refused even as an operator endpoint"
             );
         }
@@ -418,11 +437,25 @@ mod tests {
             let ip: IpAddr = raw.parse().unwrap();
             assert!(is_blocked_ip(ip), "{raw} must be blocked");
         }
-        for raw in ["8.8.8.8", "1.1.1.1", "93.184.216.34", "172.15.0.1", "172.32.0.1"] {
+        for raw in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "93.184.216.34",
+            "172.15.0.1",
+            "172.32.0.1",
+        ] {
             let ip: IpAddr = raw.parse().unwrap();
             assert!(!is_blocked_ip(ip), "{raw} must not be blocked");
         }
-        for raw in ["::1", "::", "fe80::1", "fc00::1", "fd00::1", "ff02::1", "2001:db8::1"] {
+        for raw in [
+            "::1",
+            "::",
+            "fe80::1",
+            "fc00::1",
+            "fd00::1",
+            "ff02::1",
+            "2001:db8::1",
+        ] {
             let ip: IpAddr = raw.parse().unwrap();
             assert!(is_blocked_ip(ip), "{raw} must be blocked");
         }

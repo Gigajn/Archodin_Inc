@@ -7,8 +7,8 @@
 //! the same seam the existing agent tests use.
 
 use archodin::graph::{
-    Graph, GraphError, InMemoryCheckpointStore, JobEvent, JobOutcome, Provider, Role, Roster,
-    ScriptedApprover, END,
+    CheckpointStore, Graph, GraphError, InMemoryCheckpointStore, JobEvent, JobOutcome, Provider,
+    Role, Roster, ScriptedApprover, END,
 };
 use futures::StreamExt;
 use mockito::Server;
@@ -33,7 +33,6 @@ fn visit(name: &'static str) -> impl Fn(Ticket) -> std::future::Ready<Ticket> + 
         std::future::ready(t)
     }
 }
-
 
 /// A graph whose conditional router returns a target that is not declared.
 fn undeclared_target_graph() -> Graph<Ticket> {
@@ -65,12 +64,7 @@ async fn a_conditional_edge_returning_an_undeclared_target_fails_instead_of_pani
 async fn a_conditional_edge_returning_an_undeclared_target_fails_a_durable_job_too() {
     let store = InMemoryCheckpointStore::<Ticket>::new();
     let err = undeclared_target_graph()
-        .run_job(
-            "job-1",
-            ticket(false),
-            &store,
-            &ScriptedApprover::new([]),
-        )
+        .run_job("job-1", ticket(false), &store, &ScriptedApprover::new([]))
         .await;
     assert_eq!(
         err,
@@ -87,11 +81,14 @@ struct Tally {
 
 fn tally_graph() -> Graph<Tally> {
     Graph::builder()
-        .node("gone", |s: Tally| async move {
-            Tally { total: s.total + 1 }
-        })
+        .node(
+            "gone",
+            |s: Tally| async move { Tally { total: s.total + 1 } },
+        )
         .node("after", |s: Tally| async move {
-            Tally { total: s.total + 10 }
+            Tally {
+                total: s.total + 10,
+            }
         })
         .edge("gone", "after")
         .entry("gone")
@@ -104,7 +101,9 @@ fn tally_graph() -> Graph<Tally> {
 fn regraphed() -> Graph<Tally> {
     Graph::builder()
         .node("other", |s: Tally| async move {
-            Tally { total: s.total + 100 }
+            Tally {
+                total: s.total + 100,
+            }
         })
         .entry("other")
         .build()
@@ -117,14 +116,16 @@ async fn a_resumed_job_naming_a_node_the_graph_no_longer_has_fails_instead_of_pa
     let idle = ScriptedApprover::new([]);
     // Interrupt the first run after its Node started: the checkpoint says the
     // next node is "gone".
-    let mut events = tally_graph().stream_job("job-1", Tally { total: 0 }, &store, &idle);
+    let graph = tally_graph();
+    let mut events = graph.stream_job("job-1", Tally { total: 0 }, &store, &idle);
     events.next().await; // JobStarted
     events.next().await; // NodeStarted
     drop(events);
-    assert_eq!(store.checkpoints("job-1").await.len(), 1);
+    assert_eq!(store.checkpoints("job-1").await.unwrap().len(), 1);
 
     // Resuming against the new graph must report the missing node as an error.
-    let mut events = regraphed().stream_job("job-1", Tally { total: 999 }, &store, &idle);
+    let graph = regraphed();
+    let mut events = graph.stream_job("job-1", Tally { total: 999 }, &store, &idle);
     let mut last = None;
     while let Some(e) = events.next().await {
         last = Some(e);
@@ -169,8 +170,11 @@ async fn an_agent_conversation_stops_growing_at_100_messages() {
         .await;
     let roster = Roster::new();
     roster.add_role(
-        Role::new("Writer", "Be brief")
-            .model_chain(vec![Provider::openai_compatible(server.url(), "key", "m")]),
+        Role::new("Writer", "Be brief").model_chain(vec![Provider::openai_compatible(
+            server.url(),
+            "key",
+            "m",
+        )]),
     );
     let nova = roster.hire("Writer", "Nova").unwrap();
 
@@ -193,7 +197,12 @@ async fn an_agent_conversation_stops_growing_at_100_messages() {
 async fn a_durable_job_that_finishes_still_reports_finished() {
     let store = InMemoryCheckpointStore::<Tally>::new();
     let outcome = tally_graph()
-        .run_job("job-2", Tally { total: 0 }, &store, &ScriptedApprover::new([]))
+        .run_job(
+            "job-2",
+            Tally { total: 0 },
+            &store,
+            &ScriptedApprover::new([]),
+        )
         .await
         .unwrap();
     assert_eq!(outcome, JobOutcome::Finished(Tally { total: 11 }));

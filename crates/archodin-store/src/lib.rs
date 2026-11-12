@@ -75,8 +75,12 @@ impl RoleRecord {
         for skill in self.skills {
             role = role.skill(skill);
         }
-        if let Some(tokens) = self.budget_tokens {
-            role = role.budget_tokens(tokens);
+        // `Role::new` starts at the default Budget, so a stored `None` must
+        // opt out explicitly; otherwise every restored Role without a Budget
+        // silently regained the 100k default.
+        match self.budget_tokens {
+            Some(tokens) => role = role.budget_tokens(tokens),
+            None => role = role.without_budget_limit(),
         }
         role
     }

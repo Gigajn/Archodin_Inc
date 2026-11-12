@@ -482,7 +482,6 @@ impl McpLibrary {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,11 +506,14 @@ mod tests {
             "https://",
             "not a url",
         ] {
-            let err = block_on(McpClient::connect(&McpServer::http("x", url)));
-            assert!(
-                matches!(err, Err(McpError::Transport(_))),
-                "{url} must be refused with a Transport error, got {err:?}"
-            );
+            // `McpClient` has no `Debug`, so the whole `Result` cannot be
+            // formatted — match and only format the `McpError` (which is
+            // `Debug`) on failure.
+            match block_on(McpClient::connect(&McpServer::http("x", url))) {
+                Err(McpError::Transport(_)) => {}
+                Err(e) => panic!("{url} must be refused with a Transport error, got {e:?}"),
+                Ok(_) => panic!("{url} must be refused with a Transport error, but it connected"),
+            }
         }
     }
 
@@ -545,4 +547,3 @@ mod tests {
         }
     }
 }
-

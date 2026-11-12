@@ -331,13 +331,13 @@ impl UsageMeter {
 
     /// Everything `job` has used so far.
     pub fn job_usage(&self, job: &str) -> Usage {
-        let s = self.state.lock().unwrap();
+        let s = mutex(&self.state);
         s.by_job.get(job).copied().unwrap_or_default()
     }
 
     /// Everything `agent` has used so far, across Jobs.
     pub fn agent_usage(&self, agent: &str) -> Usage {
-        let s = self.state.lock().unwrap();
+        let s = mutex(&self.state);
         s.by_agent.get(agent).copied().unwrap_or_default()
     }
 
@@ -346,7 +346,7 @@ impl UsageMeter {
     /// Resetting a Budget voids any outstanding waiver for that scope: an
     /// approval granted under the old Budget does not carry over.
     pub fn set_job_budget(&self, job: &str, budget: Budget) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = mutex(&self.state);
         s.job_budgets.insert(job.to_string(), budget);
         let _ = s.waivers.remove(&BudgetScope::Job(job.to_string()));
     }
@@ -355,13 +355,13 @@ impl UsageMeter {
     ///
     /// Resetting a Budget voids any outstanding waiver for that scope.
     pub fn set_agent_budget(&self, agent: &str, budget: Budget) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = mutex(&self.state);
         s.agent_budgets.insert(agent.to_string(), budget);
         let _ = s.waivers.remove(&BudgetScope::Agent(agent.to_string()));
     }
 
     fn set_agent_budget_if_unset(&self, agent: &str, budget: Budget) {
-        let unset = !self.state.lock().unwrap().agent_budgets.contains_key(agent);
+        let unset = !mutex(&self.state).agent_budgets.contains_key(agent);
         if unset {
             self.set_agent_budget(agent, budget);
         }
@@ -378,7 +378,7 @@ impl UsageMeter {
     /// to ask at all) must use this — evaluating a prompt must never burn the
     /// waiver for the overspend it describes.
     fn exceeded_with_reason(&self, job: &str, agent: &str) -> Option<(BudgetScope, String)> {
-        let s = self.state.lock().unwrap();
+        let s = mutex(&self.state);
         let checks = [
             (
                 BudgetScope::Job(job.to_string()),
@@ -537,7 +537,7 @@ impl UsageMeter {
     }
 
     fn agent_of(&self, node: &str) -> Option<String> {
-        self.state.lock().unwrap().node_agents.get(node).cloned()
+        mutex(&self.state).node_agents.get(node).cloned()
     }
 }
 
@@ -1049,4 +1049,3 @@ mod tests {
         meter.approve_overrun(BudgetScope::Job("job-1".into()), "tester");
     }
 }
-

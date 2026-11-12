@@ -25,12 +25,12 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use archodin_graph::Vault;
 use archodin_graph::locks::mutex;
+use archodin_graph::Vault;
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{ConnectInfo, Extension, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Json, Redirect, Response};
@@ -222,8 +222,7 @@ impl Auth {
             let wait = self.lockout_duration(entry.failures);
             entry.locked_until = Some(now + wait);
             eprintln!(
-                "[agora] login locked out: user `{}` from {} after {} failed attempts; "
-                "retry in {}s",
+                "[agora] login locked out: user `{}` from {} after {} failed attempts; retry in {}s",
                 key.1,
                 key.0,
                 entry.failures,
@@ -358,11 +357,16 @@ struct Credentials {
 
 async fn login_submit(
     State(auth): State<Auth>,
-    connect: Option<ConnectInfo<SocketAddr>>,
+    // `Option<ConnectInfo<_>>` does NOT work in axum 0.8: `ConnectInfo`
+    // lacks `OptionalFromRequestParts`, so the `Handler` bound fails.
+    // `Extension<_>` does implement it, so the optional form is
+    // `Option<Extension<ConnectInfo<_>>>` — `None` when the server was
+    // not started with `into_make_service_with_connect_info` (tests).
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(c): Json<Credentials>,
 ) -> Response {
     let client = connect
-        .map(|ConnectInfo(addr)| addr.ip().to_string())
+        .map(|Extension(ConnectInfo(addr))| addr.ip().to_string())
         .unwrap_or_else(|| "unknown".to_string());
     let key: AttemptKey = (client, c.username.clone());
     if !auth.login_allowed(&key) {
@@ -441,4 +445,3 @@ mod tests {
         assert_eq!(auth.lockout_duration(5), Duration::from_secs(60));
     }
 }
-

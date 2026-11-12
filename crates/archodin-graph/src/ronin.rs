@@ -11,7 +11,7 @@ use futures::future::BoxFuture;
 use langchain_rust::tools::DuckDuckGoSearchResults;
 
 use crate::http_guard::{
-    read_capped, shared_client, text_capped, validate_endpoint, validate_url,
+    read_capped, same_origin, shared_client, text_capped, validate_endpoint, validate_url,
 };
 use crate::{
     AgentError, AgentNode, Assignment, Skill, SkillLibrary, SkillSource, Strategos, StrategosError,
@@ -114,9 +114,10 @@ async fn get_text(
 
 /// Like [`get_text`], but `operator_base` marks a URL built from an endpoint
 /// the operator configured (a self-hosted SearXNG, the GitHub API): those may
-/// be plain `http` on a private host, because the operator chose them. Hit
-/// URLs from search results are never operator URLs and always go through
-/// the strict check in [`get_text`].
+/// be plain `http` on a private host, because the operator chose them. A hit
+/// URL from search results uses the operator check only when it shares the
+/// search endpoint's origin (it is served by the operator's own service);
+/// any other origin always goes through the strict check in [`get_text`].
 async fn get_text_checked(
     url: &str,
     accept: Option<&str>,
@@ -179,8 +180,9 @@ impl SearchEngine for SearxngSearch {
         Box::pin(async move {
             let url = format!("{}/search?q={}&format=json", self.base_url, encode(query));
             // The SearXNG base URL is operator configuration, so this request
-            // goes through the operator check; the hits it returns are still
-            // fetched through the strict check in `get_text`.
+            // goes through the operator check; a hit on the same origin as
+            // this base URL is fetched the same way (see `fetch` below), any
+            // other hit origin stays strict.
             let body = get_text_checked(&url, Some("application/json"), None, true).await?;
             let json: serde_json::Value =
                 serde_json::from_str(&body).map_err(|e| RoninError::Search(e.to_string()))?;
@@ -197,6 +199,16 @@ impl SearchEngine for SearxngSearch {
                         .collect()
                 })
                 .unwrap_or_default())
+        })
+    }
+
+    fn fetch<'a>(&'a self, hit: &'a SearchHit) -> BoxFuture<'a, Result<String, RoninError>> {
+        Box::pin(async move {
+            // A hit on the same origin as this SearXNG is served by that
+            // service itself, so it uses the operator check; any other
+            // origin is attacker-influenced and stays strict.
+            let operator = same_origin(&self.base_url, &hit.url);
+            get_text_checked(&hit.url, None, None, operator).await
         })
     }
 }
@@ -292,8 +304,9 @@ impl GitHubSearch {
             encode(query)
         );
         // The API base URL is operator configuration, so this request goes
-        // through the operator check; the hit URLs it returns are still
-        // fetched through the strict check in `GitHubSearch::fetch`.
+        // through the operator check; a hit on the same origin as this API
+        // is fetched the same way (see `GitHubSearch::fetch`), any other
+        // hit origin stays strict.
         let body = get_text_checked(
             &url,
             Some("application/vnd.github+json"),
@@ -356,10 +369,16 @@ impl SearchEngine for GitHubSearch {
 
     fn fetch<'a>(&'a self, hit: &'a SearchHit) -> BoxFuture<'a, Result<String, RoninError>> {
         Box::pin(async move {
-            get_text(
+            // A hit on the same origin as this GitHub API (the contents API
+            // lives there) is served by the operator's own service, so it
+            // uses the operator check; any other origin is
+            // attacker-influenced and stays strict.
+            let operator = same_origin(&self.api_url, &hit.url);
+            get_text_checked(
                 &hit.url,
                 Some("application/vnd.github.raw+json"),
                 self.token.as_deref(),
+                operator,
             )
             .await
         })
@@ -499,7 +518,6 @@ impl Ronin {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,7 +557,11 @@ mod tests {
 
     #[test]
     fn fetch_refuses_credentials_in_the_url() {
-        let err = block_on(get_text("https://user:pass@example.com/skill.md", None, None));
+        let err = block_on(get_text(
+            "https://user:pass@example.com/skill.md",
+            None,
+            None,
+        ));
         assert!(matches!(err, Err(RoninError::Fetch(_))));
     }
 
