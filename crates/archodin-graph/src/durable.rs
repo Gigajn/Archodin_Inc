@@ -251,7 +251,7 @@ impl<S: Clone + Send + 'static> Graph<S> {
                 match phase {
                     Phase::Begin(initial) => {
                         let latest = match store.checkpoints(&job).await {
-                            Ok(cps) => cps.pop(),
+                            Ok(mut cps) => cps.pop(),
                             Err(error) => {
                                 return Some((JobEvent::CheckpointFailed { error }, Phase::Done));
                             }
