@@ -110,6 +110,17 @@ pub enum ModelError {
         account: String,
         model: String,
     },
+    /// The provider answered 402: the account has no credits left
+    /// (typical of OpenRouter). This is NOT transient — retrying the
+    /// same request or falling back to the next chain pair only burns
+    /// more calls until the account is topped up, so the chain must
+    /// stop here and say so.
+    #[error("the {kind} provider needs payment for account `{account}` (model `{model}`): no credits left — top up, then retry")]
+    ProviderPaymentRequired {
+        kind: ModelKind,
+        account: String,
+        model: String,
+    },
     /// The network failed, timed out, or the provider answered a transient
     /// status (429, 5xx): nothing about the configuration is known to be
     /// wrong, so the chain may try its next pair.
@@ -187,6 +198,19 @@ impl ModelError {
         }
     }
 
+    /// The provider needs payment (HTTP 402): no credits left.
+    pub fn payment_required(
+        kind: ModelKind,
+        account: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self::ProviderPaymentRequired {
+            kind,
+            account: account.into(),
+            model: model.into(),
+        }
+    }
+
     /// The provider could not be reached, or answered transiently.
     pub fn unavailable(
         kind: ModelKind,
@@ -201,7 +225,8 @@ impl ModelError {
     }
 
     /// Maps an HTTP status to the typed error: 401/403 → `ProviderAuthFailed`,
-    /// 404 → `ModelNotFound`, anything else (429, 5xx, …) → `ProviderUnavailable`.
+    /// 404 → `ModelNotFound`, 402 → `ProviderPaymentRequired`, anything else
+    /// (429, 5xx, …) → `ProviderUnavailable`.
     /// The upstream body is deliberately NOT carried: it may contain a key.
     pub fn from_status(
         status: u16,
@@ -211,6 +236,7 @@ impl ModelError {
     ) -> Self {
         match status {
             401 | 403 => Self::auth_failed(kind, account, model),
+            402 => Self::payment_required(kind, account, model),
             404 => Self::not_found(kind, account, model),
             _ => Self::unavailable(kind, account, model),
         }
@@ -223,6 +249,7 @@ impl ModelError {
             Self::ModelKeyMissing { kind, .. }
             | Self::ProviderAuthFailed { kind, .. }
             | Self::ModelNotFound { kind, .. }
+            | Self::ProviderPaymentRequired { kind, .. }
             | Self::ProviderUnavailable { kind, .. } => Some(*kind),
         }
     }
@@ -234,6 +261,7 @@ impl ModelError {
             | Self::ModelKeyMissing { account, .. }
             | Self::ProviderAuthFailed { account, .. }
             | Self::ModelNotFound { account, .. }
+            | Self::ProviderPaymentRequired { account, .. }
             | Self::ProviderUnavailable { account, .. } => account,
         }
     }
@@ -245,6 +273,7 @@ impl ModelError {
             | Self::ModelKeyMissing { model, .. }
             | Self::ProviderAuthFailed { model, .. }
             | Self::ModelNotFound { model, .. }
+            | Self::ProviderPaymentRequired { model, .. }
             | Self::ProviderUnavailable { model, .. } => model,
         }
     }
@@ -712,6 +741,27 @@ mod tests {
         assert_eq!(auth.kind(), Some(ModelKind::Claude));
         assert_eq!(auth.account(), "work");
         assert_eq!(auth.model(), "m1");
+    }
+
+    #[test]
+    fn http_402_maps_to_payment_required_not_to_unavailable() {
+        // 402 means "no credits" (typical of OpenRouter): retrying or
+        // falling back to the next chain pair is pointless until the
+        // account is topped up, so it must NOT collapse into the
+        // transient `ProviderUnavailable`.
+        let err = ModelError::from_status(402, ModelKind::OpenAiCompatible, "openrouter", "m1");
+        assert_eq!(
+            err,
+            ModelError::payment_required(ModelKind::OpenAiCompatible, "openrouter", "m1")
+        );
+        assert_ne!(
+            err,
+            ModelError::unavailable(ModelKind::OpenAiCompatible, "openrouter", "m1")
+        );
+        assert_eq!(err.kind(), Some(ModelKind::OpenAiCompatible));
+        assert_eq!(err.account(), "openrouter");
+        assert_eq!(err.model(), "m1");
+        assert!(err.to_string().contains("payment"), "{err}");
     }
 
     #[test]

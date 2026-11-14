@@ -51,7 +51,7 @@ _Avoid_: Dashboard, admin panel, UI
 ## Models
 
 **Provider**:
-A source of LLM completions; an OpenAI-compatible Provider is one reached by base URL, API key and model name (9router, OpenRouter, Groq, LM Studio, vLLM). One Provider may have several accounts.
+A source of LLM completions; an OpenAI-compatible Provider is one reached by base URL, API key and model name (OpenRouter, Groq, LM Studio, vLLM). One Provider may have several accounts.
 _Avoid_: Backend, vendor, model
 
 **Model chain**:
@@ -86,6 +86,57 @@ Satu kunci 32-byte yang mengenkripsi seluruh Vault; datang dari env
 masuk DB, dan dihapus dari memori (di-zeroize) setelah dipakai.
 _Avoid_: Master password, passphrase
 
+**Vault key file**:
+File berisi satu baris base64 kunci Vault, dibaca lewat
+`BASILEIA_VAULT_KEY_FILE`. Ini jalur yang dipilih (ADR 0026): file
+**harus mode 0600** — file yang lebih longgar ditolak saat startup
+sebelum isinya dibaca. `BASILEIA_VAULT_KEY` inline hanya fallback, dibaca
+dulu bila ada dan tidak kosong; bila absen/kosong, barulah file dibaca.
+_Avoid_: Master key file, kunci di disk
+
+**Degraded / locked**:
+Keadaan server saat start tanpa kunci Vault (ADR 0021 §Decision 4):
+server tetap jalan, kunci dari env tetap bekerja, tetapi akun model dari
+Agora yang tersimpan sebagai sealed blob tidak bisa dibuka — Registry
+menandai akun-akun itu `locked` dan Agora menampilkannya apa adanya.
+Unlock hanya lewat restart dengan kunci Vault; kunci master tidak pernah
+dikirim lewat API.
+_Avoid_: Terkunci, mode aman
+
+**Kind**:
+Bentuk API yang dipakai satu akun model — bukan nama vendor dan bukan
+nama model. Hanya empat kind di v1: `openai_compatible` (vendor apa pun
+yang bicara API OpenAI: OpenAI, OpenRouter, Groq, DeepSeek, …),
+`gemini`, `claude`, dan `ollama`. Kind baru hanya ditambahkan bila ada
+bentuk API baru yang tidak tercakup keempatnya (ADR 0022, ADR 0026).
+_Avoid_: Provider type, vendor
+
+**OpenRouter**:
+Gateway yang menjual akses ke banyak model lewat satu API
+OpenAI-compatible. Dijangkau lewat kind `openai_compatible` +
+`BASE_URL=https://openrouter.ai/api/v1` — **bukan** kind sendiri
+(ADR 0026: kind `openrouter` ditunda sebagai ADR masa depan). Health
+check-nya bisa positif palsu: `GET /v1/models` OpenRouter bersifat
+publik dan tidak memvalidasi kunci.
+_Avoid_: Provider Muse, gateway
+
+**Muse**:
+Keluarga model Meta. Dipakai lewat OpenRouter (kind
+`openai_compatible`, `BASE_URL=https://openrouter.ai/api/v1`) dengan
+nama model ditulis eksplisit, mis. `MODEL=meta/muse-spark-open` sebagai
+contoh konfigurasi — bukan default. Tidak ada kind `muse`
+(ADR 0026: ditolak eksplisit — kind adalah bentuk API, bukan nama model).
+_Avoid_: Model Meta, kind Muse
+
+**Ollama**:
+Server model lokal (tanpa kunci) di mesin sendiri. Slot opt-in yang
+dicadangkan untuk nanti (ADR 0026): kind `ollama` sudah ada,
+loopback-only (`http://127.0.0.1:11434`), health check `GET /api/tags`,
+tetapi **tidak aktif sekarang** — model cloud yang dipakai dulu. Client
+Ollama v1 tidak di-guard (penyimpangan yang diterima tertulis, ADR 0022/
+0025); sebagai gantinya URL non-loopback ditolak saat validasi.
+_Avoid_: Model lokal, LLM offline
+
 **Model Registry**:
 Satu-satunya tempat pilihan model hidup: akun model (kind, base URL, model
 default, referensi kunci) dan model chain per Role dengan override per
@@ -95,8 +146,18 @@ _Avoid_: Katalog model, routing table
 **Akun model**:
 Satu kredensial untuk satu provider: kind (`openai_compatible`, `gemini`,
 `claude`, `ollama`), base URL, model default, dan satu nama secret di Vault.
-Satu provider boleh punya beberapa akun.
+Satu provider boleh punya beberapa akun. Model default akun boleh kosong
+bila model ditetapkan per Role di chain — tetapi nama modelnya sendiri
+tidak pernah ditebak: lihat "Nama model eksplisit".
 _Avoid_: Provider account, koneksi
+
+**Nama model eksplisit**:
+Aturan bahwa **nama model tidak pernah punya default** (ADR 0022/0023,
+ADR 0026): tidak ada nama model yang di-hardcode di server, di Registry,
+atau di `default_base_url`. Setiap akun dan setiap entri chain harus
+menuliskan nama model secara eksplisit (`MODEL=…` di env); bila tidak
+ada, resolve gagal dengan error yang jelas, bukan menebak model.
+_Avoid_: Model default, katalog model
 
 **Provisioning**:
 Cara kunci masuk ke server: env var saat startup (bootstrap) atau API Agora
@@ -108,6 +169,9 @@ _Avoid_: Setup kunci, import kunci
 Tes on-demand bahwa satu akun model benar-benar bisa dipakai: memanggil
 endpoint daftar model provider (`GET /v1/models` atau setaranya) lewat
 guarded client, tanpa memanggil inference. Hasilnya status, bukan janji.
+Status 402 (akun kehabisan kredit) dilaporkan tersendiri sebagai
+`payment_required` — bukan `unreachable`: jaringannya baik, saldonya yang
+habis.
 _Avoid_: Ping, tes koneksi
 
 **Rotasi**:

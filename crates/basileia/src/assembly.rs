@@ -233,6 +233,33 @@ async fn build_roster(store: &SqlStore) -> Result<Roster, Error> {
     Ok(roster)
 }
 
+/// The startup warning when no Vault key is configured but a sealed vault
+/// exists: the locked accounts are named (names only, never key material),
+/// and the operator is told to restart with `BASILEIA_VAULT_KEY_FILE` —
+/// the chosen path for the key (ADR 0021 amendment 2026-11-14) — rather
+/// than the vague "restart with the vault key".
+fn sealed_vault_locked_warning(locked: &[String]) -> String {
+    format!(
+        "basileia: WARNING: no BASILEIA_VAULT_KEY configured, but a sealed vault \
+         exists: {} persisted model account(s) locked ({}); restart with \
+         BASILEIA_VAULT_KEY_FILE set to the 0600 key file (or BASILEIA_VAULT_KEY) \
+         to unlock them",
+        locked.len(),
+        locked.join(", ")
+    )
+}
+
+/// The startup warning when NO Vault key is configured AND no sealed vault
+/// exists: nothing is locked yet, but anything added through the Agora in
+/// this run will be locked after a restart. Emitted once, at startup, in
+/// `build_vault_and_registry` — never per request.
+fn no_vault_key_warning() -> &'static str {
+    "basileia: WARNING: no Vault key configured (BASILEIA_VAULT_KEY_FILE / \
+     BASILEIA_VAULT_KEY) and no sealed vault exists: model accounts added in \
+     this run will be locked after a restart — set BASILEIA_VAULT_KEY_FILE to \
+     a 0600 key file to keep them"
+}
+
 /// The account names of the `model/*` secrets visible in a sealed-vault
 /// envelope, without the Vault key: only the NAMES are in clear in the
 /// envelope (ADR 0021), never the values. A malformed envelope logs an
@@ -311,18 +338,13 @@ pub(crate) async fn build_vault_and_registry(
         (Some(key), None) => (Vault::new(key), false, Vec::new()),
         (None, Some(bytes)) => {
             let locked = locked_account_names_from_envelope(&bytes);
-            eprintln!(
-                "basileia: WARNING: no BASILEIA_VAULT_KEY configured, but a sealed vault \
-                 exists: {} persisted model account(s) locked ({}); restart with the \
-                 vault key to unlock them",
-                locked.len(),
-                locked.join(", ")
-            );
+            eprintln!("{}", sealed_vault_locked_warning(&locked));
             let mut key = [0u8; 32];
             getrandom::fill(&mut key)?;
             (Vault::new(key.into()), true, locked)
         }
         (None, None) => {
+            eprintln!("{}", no_vault_key_warning());
             let mut key = [0u8; 32];
             getrandom::fill(&mut key)?;
             (Vault::new(key.into()), false, Vec::new())
@@ -537,6 +559,20 @@ mod tests {
         let vault = Vault::new(vault_key.into());
         vault.put("model/openai_compatible/main", CANARY);
         vault.seal_envelope().unwrap()
+    }
+
+    #[test]
+    fn vault_warnings_name_the_key_file_and_the_lock_after_restart() {
+        // (a) The degraded warning must name BASILEIA_VAULT_KEY_FILE.
+        let warning = sealed_vault_locked_warning(&["main".to_string(), "work".to_string()]);
+        assert!(warning.contains("BASILEIA_VAULT_KEY_FILE"), "{warning}");
+        assert!(warning.contains("main"), "{warning}");
+        assert!(warning.contains("work"), "{warning}");
+        // (b) The no-key-at-all warning must name the file variable and
+        // say the accounts added in this run will be locked after restart.
+        let warning = no_vault_key_warning();
+        assert!(warning.contains("BASILEIA_VAULT_KEY_FILE"), "{warning}");
+        assert!(warning.contains("locked after a restart"), "{warning}");
     }
 
     #[tokio::test]

@@ -129,7 +129,7 @@ pub fn validate_provision(input: ProvisionInput) -> Result<ValidatedProvision, M
             ModelKind::OpenAiCompatible,
             &input.name,
             "",
-            "kind is required and must be one of openai_compatible|gemini|claude|ollama",
+            "kind is required and must be one of openai_compatible|gemini|claude|ollama (OpenRouter/Muse use openai_compatible with BASE_URL)",
         )
     })?;
     let key = input.key.unwrap_or_default();
@@ -335,6 +335,10 @@ pub enum HealthStatus {
     Ok,
     /// Provider menjawab 401/403: kunci salah atau dicabut di vendor.
     AuthFailed,
+    /// Provider menjawab 402: akun kehabisan kredit (khas OpenRouter).
+    /// Bukan `unreachable` — jaringan baik-baik saja, yang habis adalah
+    /// saldo; operator harus top up, bukan memeriksa jaringan.
+    PaymentRequired,
     /// Tidak terjangkau: transport gagal, timeout, atau status lain.
     Unreachable,
     /// Kunci akun tidak ada di Vault (revoked / vault terkunci).
@@ -347,6 +351,7 @@ impl HealthStatus {
         match self {
             Self::Ok => "ok",
             Self::AuthFailed => "auth_failed",
+            Self::PaymentRequired => "payment_required",
             Self::Unreachable => "unreachable",
             Self::KeyMissing => "key_missing",
         }
@@ -356,7 +361,7 @@ impl HealthStatus {
 /// Hasil satu health check on-demand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HealthOutcome {
-    /// Status (`ok` / `auth_failed` / `unreachable` / `key_missing`).
+    /// Status (`ok` / `auth_failed` / `payment_required` / `unreachable` / `key_missing`).
     pub status: HealthStatus,
     /// Latensi request, milidetik.
     pub latency_ms: u64,
@@ -393,7 +398,8 @@ pub fn health_url(account: &ModelAccount) -> String {
 /// Kunci diambil dari Vault di sini (bukan diteruskan sebagai `String`):
 /// `ollama` tidak memakai kunci; akun lain yang kuncinya hilang memberi
 /// [`HealthStatus::KeyMissing`] tanpa satu pun request keluar. Status HTTP
-/// dipetakan 2xx → ok, 401/403 → auth_failed, sisanya → unreachable.
+/// dipetakan 2xx → ok, 401/403 → auth_failed, 402 → payment_required,
+/// sisanya → unreachable.
 /// Body respons tidak pernah dibaca.
 pub async fn health_check(
     vault: &Vault,
@@ -447,6 +453,7 @@ pub async fn health_check(
             let outcome_status = match status {
                 200..=299 => HealthStatus::Ok,
                 401 | 403 => HealthStatus::AuthFailed,
+                402 => HealthStatus::PaymentRequired,
                 _ => HealthStatus::Unreachable,
             };
             let detail = if outcome_status == HealthStatus::Ok {
@@ -601,6 +608,31 @@ mod tests {
     }
 
     #[test]
+    fn default_base_urls_match_the_spec_for_all_four_kinds() {
+        // Test kesepakatan (ADR 0026 / C1): `default_base_url` di sini
+        // diduplikasi di `basileia::config::default_base_url` — dua test
+        // literal ini bersama-sama mendeteksi drift antara keduanya.
+        // Nilai-nilai di bawah adalah sumber kebenaran independen
+        // (dok vendor / ADR 0020 §Decision 2), bukan salinan dari kode.
+        assert_eq!(
+            default_base_url(ModelKind::OpenAiCompatible),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            default_base_url(ModelKind::Gemini),
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+        assert_eq!(
+            default_base_url(ModelKind::Claude),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            default_base_url(ModelKind::Ollama),
+            "http://127.0.0.1:11434"
+        );
+    }
+
+    #[test]
     fn account_names_must_be_slugs() {
         assert!(validate_account_name("main").is_ok());
         assert!(validate_account_name("groq_cepat").is_ok());
@@ -609,6 +641,26 @@ mod tests {
             let err = validate_account_name(bad).unwrap_err();
             assert!(err.to_string().contains("slug"), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn unknown_kind_errors_point_openrouter_users_to_openai_compatible() {
+        // OpenRouter and Muse have no kind of their own (ADR 0026): they
+        // are reached through `openai_compatible` + BASE_URL, so the error
+        // for an unknown kind must say so instead of only listing kinds.
+        let err =
+            validate_provision(provision_input("main", "openrouter", Some("sk-x"))).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("(OpenRouter/Muse use openai_compatible with BASE_URL)"),
+            "{err}"
+        );
+        let err = validate_provision(provision_input("main", "muse", Some("sk-x"))).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("(OpenRouter/Muse use openai_compatible with BASE_URL)"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -777,6 +829,70 @@ mod tests {
         let outcome = run_blocking(health_check(&vault, &dead)).unwrap();
         assert_eq!(outcome.status, HealthStatus::Unreachable);
         assert!(!outcome.detail.contains(&canary), "{}", outcome.detail);
+    }
+
+    #[test]
+    fn health_check_maps_402_to_payment_required_not_to_unreachable() {
+        // 402 means "no credits" (typical of OpenRouter): reporting it as
+        // `unreachable` would send the operator chasing the network
+        // instead of topping up the account.
+        let mut server = mockito::Server::new();
+        let base = server.url();
+        let vault = Vault::new([7; 32].into());
+        let canary = canary();
+        vault.put("model/openai_compatible/main", &canary);
+        let account = ModelAccount::new("main", ModelKind::OpenAiCompatible, &base, "m1");
+        let mock = server.mock("GET", "/v1/models").with_status(402).create();
+        let outcome = run_blocking(health_check(&vault, &account)).unwrap();
+        mock.assert();
+        assert_eq!(outcome.status, HealthStatus::PaymentRequired);
+        assert_eq!(outcome.status.as_str(), "payment_required");
+        assert_eq!(outcome.detail, "provider answered HTTP 402");
+        assert!(!outcome.detail.contains(&canary), "{}", outcome.detail);
+    }
+
+    #[test]
+    fn health_check_for_an_openrouter_account_uses_one_v1_segment_and_bearer() {
+        // C9: an OpenRouter account is an `openai_compatible` account with
+        // BASE_URL `https://openrouter.ai/api/v1` and an explicit model
+        // (here `meta/muse-spark-open`, in the TEST only — no model name
+        // is ever a code default). The health URL must be
+        // `https://openrouter.ai/api/v1/models`, never `/api/v1/v1/models`.
+        let openrouter = ModelAccount::new(
+            "openrouter",
+            ModelKind::OpenAiCompatible,
+            "https://openrouter.ai/api/v1",
+            "meta/muse-spark-open",
+        );
+        assert_eq!(
+            health_url(&openrouter),
+            "https://openrouter.ai/api/v1/models"
+        );
+
+        // The same base shape against a local mock: `/api/v1` + `/v1/models`
+        // collapses to `/api/v1/models`, the Bearer key is sent, 200 → ok.
+        let mut server = mockito::Server::new();
+        let base = format!("{}/api/v1", server.url());
+        let vault = Vault::new([7; 32].into());
+        vault.put("model/openai_compatible/openrouter", "sk-canary-openrouter");
+        let account = ModelAccount::new(
+            "openrouter",
+            ModelKind::OpenAiCompatible,
+            &base,
+            "meta/muse-spark-open",
+        );
+        assert_eq!(
+            health_url(&account),
+            format!("{}/api/v1/models", server.url())
+        );
+        let mock = server
+            .mock("GET", "/api/v1/models")
+            .match_header("authorization", "Bearer sk-canary-openrouter")
+            .with_status(200)
+            .create();
+        let outcome = run_blocking(health_check(&vault, &account)).unwrap();
+        mock.assert();
+        assert_eq!(outcome.status, HealthStatus::Ok);
     }
 
     #[test]

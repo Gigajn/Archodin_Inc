@@ -67,6 +67,117 @@ Notes:
   terminates here.
 - No trading desk is built here (trading is deferred to the end, ADR 0007).
 
+## Model accounts
+
+Model accounts connect the server to cloud models (ADR 0020–0026).
+Each account is four variables, named after its slug (`<ACCOUNT>` is
+`[a-z0-9_]+`, e.g. `muse`):
+
+| Variable | Meaning |
+|---|---|
+| `BASILEIA_MODEL_<ACCOUNT>_KEY` | API key (required, except `ollama`). Never commit it; `sk-canary-…` below is a placeholder. |
+| `BASILEIA_MODEL_<ACCOUNT>_KIND` | `openai_compatible`, `gemini`, `claude`, or `ollama`. |
+| `BASILEIA_MODEL_<ACCOUNT>_BASE_URL` | Optional — when empty, the per-kind default is used (see below). |
+| `BASILEIA_MODEL_<ACCOUNT>_MODEL` | The model name. **A model name never has a default** (ADR 0022/0023, ADR 0026): it must always be written explicitly, here or per Role in the chain. A missing model fails loudly instead of guessing one. |
+
+Per-kind default `BASE_URL` (you may leave `BASE_URL` empty when you
+use the default): `openai_compatible` →
+`https://api.openai.com/v1`, `gemini` →
+`https://generativelanguage.googleapis.com/v1beta`, `claude` →
+`https://api.anthropic.com`, `ollama` → `http://127.0.0.1:11434`.
+
+### Vault key file (runbook)
+
+The Vault key encrypts every model key the server stores, so it must
+survive restarts. The chosen path is a **file, mode 0600** (ADR 0026),
+read through `BASILEIA_VAULT_KEY_FILE`:
+
+```sh
+# 1. Generate a key (prints base64 of 32 random bytes; nothing is stored).
+cargo run -p basileia -- generate-vault-key
+
+# 2. Write it to a file that is NEVER created 0644: either create it
+#    with a restrictive umask, or fix the mode right after writing.
+umask 077
+cargo run -p basileia -- generate-vault-key > ~/.config/basileia/vault.key
+# …or, if the file already exists with the wrong mode:
+install -m 0600 /dev/null ~/.config/basileia/vault.key
+cargo run -p basileia -- generate-vault-key > ~/.config/basileia/vault.key
+chmod 0600 ~/.config/basileia/vault.key
+
+# 3. Point the server at it.
+BASILEIA_VAULT_KEY_FILE="$HOME/.config/basileia/vault.key"
+```
+
+Behaviour: a file more permissive than `0600` is **refused at startup**
+before its contents are read. `BASILEIA_VAULT_KEY` (inline base64) is
+only a fallback — it is read first when set and non-empty, and the file
+is read only when it is absent or empty. If neither is set, the server
+still starts in **degraded** mode: env-provisioned keys keep working,
+but accounts stored from the Agora are reported `locked` until a restart
+with the Vault key (ADR 0021 §Decision 4). Never put the Vault key in
+the repo, in the database, or through the Agora API.
+
+### Example environment: the four cloud models
+
+```sh
+# Claude (native client). BASE_URL may be omitted: it defaults to
+# https://api.anthropic.com. Replace <nama-model-claude> with the model
+# you use — the provider's model list is the source of truth.
+BASILEIA_MODEL_claude_KEY='sk-canary-claude'
+BASILEIA_MODEL_claude_KIND='claude'
+BASILEIA_MODEL_claude_MODEL='<nama-model-claude>'
+
+# Gemini (native client). BASE_URL may be omitted: it defaults to
+# https://generativelanguage.googleapis.com/v1beta.
+BASILEIA_MODEL_gemini_KEY='sk-canary-gemini'
+BASILEIA_MODEL_gemini_KIND='gemini'
+BASILEIA_MODEL_gemini_MODEL='<nama-model-gemini>'
+
+# ChatGPT (OpenAI, via openai_compatible). BASE_URL may be omitted: it
+# defaults to https://api.openai.com/v1.
+BASILEIA_MODEL_chatgpt_KEY='sk-canary-openai'
+BASILEIA_MODEL_chatgpt_KIND='openai_compatible'
+BASILEIA_MODEL_chatgpt_MODEL='<nama-model-openai>'
+
+# Muse (Meta, via OpenRouter — kind openai_compatible, ADR 0026).
+# BASE_URL MUST be set here: the default for openai_compatible is
+# OpenAI's, not OpenRouter's. MODEL below is a configuration example,
+# not a code default.
+BASILEIA_MODEL_muse_KEY='sk-canary-openrouter'
+BASILEIA_MODEL_muse_KIND='openai_compatible'
+BASILEIA_MODEL_muse_BASE_URL='https://openrouter.ai/api/v1'
+BASILEIA_MODEL_muse_MODEL='meta/muse-spark-open'
+```
+
+Notes:
+
+- There is no `muse` or `openrouter` kind on purpose (ADR 0026):
+  a kind is the shape of the API, not a model name. Anything that
+  speaks the OpenAI API — including OpenRouter — is
+  `openai_compatible` + `BASE_URL`.
+- A `402` from a provider (no credits, typical of OpenRouter) is
+  reported as its own error (`ProviderPaymentRequired` / health status
+  `payment_required`): top the account up, do not chase the network
+  and do not retry blindly.
+- Health check caveat (ADR 0026, C5): OpenRouter's `GET /v1/models`
+  is public and does not validate the key, so an `ok` health check
+  there is not proof the key is valid. Health checks have never been
+  run against a live provider yet — verify them by hand (C4).
+
+### Ollama (local models) — reserved for later
+
+Ollama is **not active now**: a slot is reserved for later (ADR 0026),
+while the cloud models above are used. When the time comes, the shape
+is (commented out on purpose — do not enable it yet):
+
+```sh
+# BASILEIA_MODEL_local_KIND='ollama'
+# BASILEIA_MODEL_local_BASE_URL='http://127.0.0.1:11434'
+# BASILEIA_MODEL_local_MODEL='<nama-model-ollama>'
+# (no KEY: an ollama account needs no key; loopback-only.)
+```
+
 ## What a Job does (current scope)
 
 A submitted Job runs `intake` → `acknowledge` → `finish`:

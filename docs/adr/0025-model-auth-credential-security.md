@@ -69,7 +69,8 @@ Briefing, Akasha, Checkpoint, atau Job state.
   kredensial non-string (ADR 0022 menundanya). Itu harga yang benar:
   pola bypass tidak dipertahankan demi satu provider yang ditunda.
 - Ollama yang hari ini memakai `from_llm` di-refactor ke konstruktor
-  langsung di atas guarded client.
+  langsung; client-nya adalah client reqwest 0.12 dengan timeout 30 detik
+  + loopback-only, BUKAN guarded client — pengecualian tertulis §3a.
 
 ### 3. Semua panggilan model WAJIB lewat client yang di-guard — tanpa pengecualian
 
@@ -84,10 +85,46 @@ Briefing, Akasha, Checkpoint, atau Job state.
 - **Garis keras: bila injeksi terbukti tidak mungkin untuk satu provider,
   provider itu TIDAK dikirim di v1.** Tidak ada pengecualian "sementara"
   yang menelepon tanpa guard. Cakupan menyusut; keamanan tidak.
+  Satu-satunya pengecualian terhadap garis ini adalah Ollama, dan itu pun
+  tertulis dan terbatas di §3a di bawah — bukan "sementara" tanpa batas.
 - Konstruktor yang mengendus env (`CLAUDE_API_KEY` dkk. dengan
   `unwrap_or_default()`) DILARANG di jalur produksi. Fase 3 mengaudit
   dengan grep: tidak ada pemanggilan konstruktor itu dari kode produksi;
   semua kunci datang dari Vault lewat provisioning (ADR 0020).
+
+### 3a. Pengecualian TERTULIS dan TERBATAS: Ollama (satu-satunya)
+
+Garis keras §3 di atas berlaku penuh untuk semua provider cloud — tanpa
+pengecualian. Satu-satunya pengecualian adalah Ollama, diterima secara
+tertulis di sini (keputusan grill 2026-11-14), dan hanya selama
+kondisi-kondisi di bawah ini semuanya benar:
+
+- **Alasan teknis, terverifikasi compiler (bukan asumsi):** ollama-rs
+  0.3.6 dibangun di atas reqwest 0.12, sedangkan `shared_client()` adalah
+  reqwest 0.13 — kedua tipe `Client` itu berbeda, sehingga guarded client
+  TIDAK BISA diinjeksikan lewat `Ollama::builder().reqwest_client(...)`
+  (builder menerima client eksternal, tetapi hanya yang 0.12). Lihat
+  `native.rs` (komentar OPEN RISK di `Provider::ollama`).
+- **Kontrol kompensasi 1 — loopback-only:** konstruktor `Provider::ollama`
+  menolak URL apa pun yang bukan loopback (`127.0.0.0/8`, `::1`,
+  `localhost`). Client yang tidak di-guard itu tidak pernah bisa diarahkan
+  ke layanan LAN atau alamat metadata cloud lewat konfigurasi.
+- **Kontrol kompensasi 2 — timeout 30 detik (B3):** client 0.12 yang
+  dipakai Ollama dibangun di `native.rs` dengan timeout total yang sama
+  dengan `shared_client()` (`http_guard::REQUEST_TIMEOUT`), jadi satu
+  server Ollama yang menggantung tidak bisa menggantung satu Job
+  selamanya.
+- **Yang TETAP tidak ada:** client Ollama tidak punya redirect policy,
+  filter DNS http-acl, maupun cap 2 MiB seperti guarded client. Itu
+  diterima hanya karena loopback-only: permukaannya satu server lokal
+  yang dikendalikan operator sendiri.
+- **Follow-up, tetap terbuka:** patch ollama-rs ke reqwest 0.13 (atau
+  guarded client 0.12), lalu injeksikan `shared_client()` dan HAPUS
+  pengecualian ini beserta komentar OPEN RISK-nya. Pengecualian ini BUKAN
+  preseden: provider cloud apa pun yang tidak bisa diinjeksikan tetap
+  TIDAK dikirim di v1 (garis keras §3).
+- **Jangan nonaktifkan feature Ollama** demi menutup celah ini: wadahnya
+  harus tetap ada untuk nanti (keputusan user 2026-11-14, ADR 0022).
 
 ### 4. Kunci tidak pernah masuk state yang dipersist
 
@@ -136,7 +173,9 @@ membatasi dan mencatat:
 - **Membiarkan client native tanpa guard "untuk v1 saja, diperbaiki
   nanti".** DITOLAK. "Sementara" di jalur keamanan adalah permanen yang
   belum diakui; ADR 0010 sudah memutuskan satu client, dan satu
-  pengecualian adalah preseden untuk pengecualian kedua.
+  pengecualian adalah preseden untuk pengecualian kedua. Satu-satunya
+  pengecualian terhadap penolakan ini adalah Ollama, dan itu pun tertulis
+  dan terbatas di §3a — bukan "sementara" tanpa batas.
 - **Mengirim kunci lewat header yang sama tetapi membiarkan langchain
   membangun client-nya sendiri dengan timeout default.** DITOLAK: timeout
   default reqwest adalah tanpa batas — satu provider lambat dapat

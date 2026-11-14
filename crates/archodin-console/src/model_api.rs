@@ -587,6 +587,10 @@ pub(crate) async fn health_account(
             AuditAction::HealthCheck,
             format!("unreachable: {}", outcome.detail),
         ),
+        HealthStatus::PaymentRequired => (
+            AuditAction::HealthCheck,
+            format!("payment_required: {}", outcome.detail),
+        ),
         HealthStatus::KeyMissing => (AuditAction::HealthCheck, "key_missing".to_string()),
     };
     api.audit(AuditEvent::new(

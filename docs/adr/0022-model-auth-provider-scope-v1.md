@@ -36,7 +36,41 @@ Fakta-fakta yang mengikat keputusan ini:
 | `openai_compatible` | `Provider::openai_compatible`, Bearer, base_url | Sudah ada; menutup OpenAI, OpenRouter, Groq, DeepSeek, Mistral, Together, xAI, Perplexity, Cohere-compat, Qwen-compat, Azure v1, LM Studio, vLLM. Validasi base_url/model/kunci kosong DITAMBAH di Fase 3 — hari ini tidak ada. |
 | `gemini` | native `gemini.rs`, header `x-goog-api-key` | Sudah lewat `shared_client()`. Dipertahankan apa adanya. |
 | `claude` | native, `x-api-key` + `anthropic-version: 2023-06-01` | Dipertahankan. WAJIB pindah ke `shared_client()` + `KeySource::Vault` di Fase 3 (ADR 0025). |
-| `ollama` | native, tanpa auth | Diaktifkan di biner Basileia di v1 (hari ini feature tidak aktif). Panic pada URL tidak valid DIHAPUS — menjadi `Result`. Base URL wajib lolos `validate_endpoint`; default `127.0.0.1:11434`. |
+| `ollama` | native, tanpa auth | Kind tersedia sebagai wadah/slot opt-in untuk local LLM — feature AKTIF di `basileia/Cargo.toml` — tetapi SEMENTARA TIDAK DIPAKAI (keputusan user 2026-11-14, lihat subbagian Ollama di bawah); model aktif sekarang = Claude, Gemini, ChatGPT (OpenAI), Muse (via OpenRouter). Panic pada URL tidak valid DIHAPUS — menjadi `Result`. Base URL wajib lolos `validate_endpoint` + loopback-only; default `127.0.0.1:11434`. |
+
+### Ollama: wadah opt-in, dicadangkan untuk nanti (keputusan user 2026-11-14)
+
+Ollama / LLM lokal SEMENTARA TIDAK dipakai, tetapi wadahnya dibuat dulu
+untuk nanti: kind `ollama` ada di Registry, konstruktor `Provider::ollama`
+ada dan teruji, dan feature `ollama` aktif di `basileia/Cargo.toml:14`.
+Tidak ada akun Ollama yang terkonfigurasi hari ini, dan tidak ada chain
+yang terpasang ke Role — jadi tidak ada jalur produksi yang bisa memanggil
+Ollama tanpa akun yang sengaja dikonfigurasi. Model aktif sekarang =
+Claude, Gemini, ChatGPT (OpenAI), Muse (via OpenRouter).
+
+**Cara mengaktifkan nanti** (contoh saja, bukan default kode):
+
+```sh
+BASILEIA_MODEL_LOCAL_KIND=ollama
+BASILEIA_MODEL_LOCAL_MODEL=llama3.2   # contoh model; bukan default kode
+# BASILEIA_MODEL_LOCAL_BASE_URL opsional; default http://127.0.0.1:11434
+# BASILEIA_MODEL_LOCAL_KEY tidak dipakai: kind ollama tidak memakai kunci
+```
+
+**Status akun `"ok"` untuk ollama BUKAN berarti server hidup (B7).**
+Daftar akun melaporkan `"ok"` bila akun tidak terkunci — dan karena ollama
+tidak punya kunci, tidak ada yang bisa hilang, jadi `"ok"` di sini hanya
+berarti "tidak terkunci". Kebenaran apakah server Ollama sedang jalan
+hanya datang dari health check manual (`GET /api/tags`, ADR 0024) —
+jangan baca `"ok"` sebagai "server hidup".
+
+**Risiko yang diterima (B6):** pemeriksaan loopback berbasis string host
+(`127.0.0.0/8`, `::1`, `localhost`), bukan IP hasil resolve. Arah amannya
+ketat — nama host yang resolve ke loopback tetapi dieja lain (mis. entri
+`/etc/hosts` kustom) ditolak — dan sisi risikonya adalah nama yang diterima
+(`localhost`) dipercaya resolve ke loopback tanpa memeriksa hasil
+resolve-nya. Itu dinilai rendah di home server, di mana operator
+mengendalikan sendiri `/etc/hosts` dan DNS.
 
 ### Keputusan auth Claude (menutup temuan "belum terverifikasi")
 

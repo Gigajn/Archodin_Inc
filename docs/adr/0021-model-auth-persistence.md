@@ -139,3 +139,36 @@ Keputusan ini adalah hibrida tiga opsi yang dievaluasi: **A + F + B'**.
   Giga berbeda (mis. semua env di satu tempat lain), beri tahu agar
   dokumentasi dan contoh systemd mengikuti setup yang benar — bukan
   sebaliknya.
+
+## Amandemen 2026-11-14 — file 0600 adalah jalur yang dipilih (jawaban user)
+
+Amandemen ini MENUTUP pertanyaan terbuka di atas dan memperbarui
+Decision 3; riwayat keputusan lama di atas TIDAK dihapus.
+
+- **Jawaban user 2026-11-14: IYA.** `BASILEIA_VAULT_KEY` tinggal di
+  file 0600 yang dibaca lewat `BASILEIA_VAULT_KEY_FILE` — itu jalur
+  yang dipilih untuk home server. `BASILEIA_VAULT_KEY` inline tetap
+  didukung sebagai fallback, dan menang bila keduanya diset (dan tidak
+  kosong).
+- **Subcommand `basileia generate-vault-key` SUDAH ADA** (bukan lagi
+  "bila murah"): ia mencetak base64 dari 32 byte acak tanpa membaca
+  `Config`, jadi tidak butuh password admin untuk membuat kunci.
+  Operator menulis keluarannya ke file 0600, lalu menunjuk
+  `BASILEIA_VAULT_KEY_FILE` ke file itu.
+- **Perubahan perilaku (A11):** `BASILEIA_VAULT_KEY` yang diset tapi
+  kosong / hanya whitespace diperlakukan sebagai ABSEN — server jatuh
+  ke `BASILEIA_VAULT_KEY_FILE` bila ada, bukan error keras. Ini selaras
+  dengan "file adalah jalur yang dipilih". Bila env DAN file absen,
+  perilaku lama berlaku (degraded, kunci acak per proses).
+- **Cek izin SEBELUM baca (A1):** izin file diperiksa pada file
+  descriptor yang sama yang kemudian dibaca — file yang terlalu longgar
+  ditolak sebelum isinya dipercaya.
+- **Pesan error ramah operator (A5/A6):** file yang tidak ada menyebut
+  `BASILEIA_VAULT_KEY_FILE` dan menyarankan `generate-vault-key`;
+  file kosong menyebut kosong dan menyarankan generator yang sama.
+  Nilai kunci tidak pernah masuk ke pesan mana pun.
+- **Warning startup menyebut `_FILE` (A7):** warning degraded saat ada
+  sealed blob, dan warning baru saat tidak ada kunci Vault SAMA SEKALI
+  (akun yang ditambahkan di run ini akan terkunci setelah restart),
+  keduanya menyebut `BASILEIA_VAULT_KEY_FILE`. Warning ditulis sekali
+  saat startup, bukan per request.

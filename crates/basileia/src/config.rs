@@ -6,12 +6,21 @@
 //! | `BASILEIA_DB` | `basileia.db` | SQLite file for the SqlStore; `:memory:` selects an in-memory store (tests, throwaway runs). This crate only enables the `sqlite` feature of `archodin-store`, so any other value is treated as a SQLite file name — a `postgres://...` URL would NOT connect to Postgres, it would be created as a (useless) file of that name. |
 //! | `BASILEIA_ADMIN_USER` | `admin` | Username for the Agora login. |
 //! | `BASILEIA_ADMIN_PASSWORD` | *(required)* | Password for the Agora login. There is no default and no way to start without one: an open Agora is exactly KR-07, and this binary refuses to be that server. The plaintext password is only ever held in memory at startup; it is hashed with `hash_password` and never written to disk. |
-//! | `BASILEIA_VAULT_KEY` | *(none)* | The Vault key: base64 of 32 random bytes. When set, the sealed vault (ADR 0021) can be reopened after a restart. Takes precedence over `BASILEIA_VAULT_KEY_FILE` when both are set. Never logged; held as `Zeroizing<[u8; 32]>` and wiped after `Vault::new`. |
-//! | `BASILEIA_VAULT_KEY_FILE` | *(none)* | A file holding the base64 Vault key (one line). The file must be mode `0600` — a more permissive file is refused at startup. Only read when `BASILEIA_VAULT_KEY` is absent. |
-//! | `BASILEIA_MODEL_<ACCOUNT>_KEY` | *(required per account)* | The API key of one model account (ADR 0020). `<ACCOUNT>` is a lowercase slug (`main`, `groq_cepat`). Required for every kind except `ollama`, which needs no key. |
+//! | `BASILEIA_VAULT_KEY` | *(none)* | The Vault key: base64 of 32 random bytes. Takes precedence over `BASILEIA_VAULT_KEY_FILE` when both are set and non-empty; an empty / whitespace-only value counts as absent and falls back to the file (ADR 0021 amendment 2026-11-14). This inline key is only the FALLBACK — the chosen path on a home server is the 0600 file via `BASILEIA_VAULT_KEY_FILE`. Never logged; held as `Zeroizing<[u8; 32]>` and wiped after `Vault::new`. |
+//! | `BASILEIA_VAULT_KEY_FILE` | *(none)* | The CHOSEN path for the Vault key on a home server (ADR 0021 amendment 2026-11-14): a file holding the base64 Vault key (one line). The file must be mode `0600` — a more permissive file is refused at startup, and its permissions are checked on the open file before its contents are read. Only read when `BASILEIA_VAULT_KEY` is absent or empty. Generate the key with `basileia generate-vault-key` and write it to the file. |
+//! | `BASILEIA_MODEL_<ACCOUNT>_KEY` | *(required per account)* | The API key of one model account (ADR 0020). `<ACCOUNT>` is a lowercase slug (`main`, `groq_cepat`). Required for every kind except `ollama`, which needs no key — and a key handed to an `ollama` account is a configuration error. |
 //! | `BASILEIA_MODEL_<ACCOUNT>_KIND` | *(required per account)* | `openai_compatible`, `gemini`, `claude`, or `ollama`. |
 //! | `BASILEIA_MODEL_<ACCOUNT>_BASE_URL` | *(default per kind)* | Optional; when set it must pass `http_guard::validate_endpoint` (checked through `ModelAccount::validate`). Empty means the per-kind default. |
-//! | `BASILEIA_MODEL_<ACCOUNT>_MODEL` | *(optional)* | The account's default model. May be empty when the model is set per Role instead (ADR 0023) — such an account's key still lands in the Vault, but it is only registered in the Registry once a model is set.
+//! | `BASILEIA_MODEL_<ACCOUNT>_MODEL` | *(optional)* | The account's default model. May be empty when the model is set per Role instead (ADR 0023) — such an account's key still lands in the Vault, but it is only registered in the Registry once a model is set. A model name is NEVER defaulted anywhere: model names are configuration, never a hardcoded catalogue (ADR 0022/0023).
+//!
+//! Recipe — Muse through OpenRouter (the model name here is an example in
+//! documentation, not a default in code):
+//! ```text
+//! BASILEIA_MODEL_MUSE_KEY=sk-canary-…
+//! BASILEIA_MODEL_MUSE_KIND=openai_compatible
+//! BASILEIA_MODEL_MUSE_BASE_URL=https://openrouter.ai/api/v1
+//! BASILEIA_MODEL_MUSE_MODEL=meta/muse-spark-open
+//! ```
 //!
 //! When no Vault key is configured at all, the server still starts: the
 //! Vault key is random per process (the old behaviour) and any sealed
@@ -171,19 +180,23 @@ const MODEL_PREFIX: &str = "BASILEIA_MODEL_";
 /// Parses the Vault key from the environment map: `BASILEIA_VAULT_KEY`
 /// first, else `BASILEIA_VAULT_KEY_FILE`. `None` when neither is set — the
 /// caller then uses a random per-process key (degraded mode, ADR 0021).
-/// Strict: invalid base64 or a length other than 32 bytes is an error,
-/// and the value is never included in it.
+/// An env key that is set but empty / whitespace-only counts as ABSENT:
+/// it falls back to the file (ADR 0021 amendment 2026-11-14 — the file is
+/// the chosen path, the inline key only the fallback). Strict: invalid
+/// base64 or a length other than 32 bytes is an error, and the value is
+/// never included in it. The file's permissions are checked on the open
+/// file descriptor BEFORE its contents are read, so a too-permissive file
+/// is refused without its contents ever being trusted.
 pub fn parse_vault_key(
     vars: &HashMap<String, String>,
 ) -> Result<Option<Zeroizing<[u8; 32]>>, ConfigError> {
     if let Some(encoded) = vars.get("BASILEIA_VAULT_KEY") {
         let trimmed = encoded.trim();
-        if trimmed.is_empty() {
-            return Err(ConfigError::BadVaultKey(
-                "the variable is set but empty".to_string(),
-            ));
+        if !trimmed.is_empty() {
+            return decode_vault_key(trimmed).map(Some);
         }
-        return decode_vault_key(trimmed).map(Some);
+        // Empty / whitespace-only: treated as absent — fall through to
+        // the file below (and to `None` when no file is configured).
     }
     let Some(path) = vars.get("BASILEIA_VAULT_KEY_FILE") else {
         return Ok(None);
@@ -194,15 +207,42 @@ pub fn parse_vault_key(
             "the variable is set but empty".to_string(),
         ));
     }
-    let contents = std::fs::read_to_string(path)
-        .map_err(|e| ConfigError::VaultKeyFile(path.clone(), e.to_string()))?;
-    check_key_file_permissions(path)?;
-    decode_vault_key(contents.trim())
-        .map(Some)
-        .map_err(|e| match e {
-            ConfigError::BadVaultKey(reason) => ConfigError::VaultKeyFile(path.clone(), reason),
-            other => other,
-        })
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| ConfigError::VaultKeyFile(path.clone(), vault_key_file_read_reason(&e)))?;
+    check_key_file_permissions(&file, path)?;
+    let mut contents = String::new();
+    {
+        use std::io::Read as _;
+        file.read_to_string(&mut contents)
+            .map_err(|e| ConfigError::VaultKeyFile(path.clone(), e.to_string()))?;
+    }
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return Err(ConfigError::VaultKeyFile(
+            path.clone(),
+            "the file is empty — generate a key with `basileia generate-vault-key` \
+             and write it to the file"
+                .to_string(),
+        ));
+    }
+    decode_vault_key(trimmed).map(Some).map_err(|e| match e {
+        ConfigError::BadVaultKey(reason) => ConfigError::VaultKeyFile(path.clone(), reason),
+        other => other,
+    })
+}
+
+/// The reason a key file could not be opened, phrased for the operator:
+/// a missing file names `BASILEIA_VAULT_KEY_FILE` and points at the
+/// generator that makes one. The file's contents are never in it.
+fn vault_key_file_read_reason(error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        format!(
+            "{error} — check that BASILEIA_VAULT_KEY_FILE points at an existing file; \
+             create one with `basileia generate-vault-key`"
+        )
+    } else {
+        error.to_string()
+    }
 }
 
 /// Decodes one base64 Vault key: exactly 32 bytes after decoding.
@@ -218,13 +258,16 @@ fn decode_vault_key(trimmed: &str) -> Result<Zeroizing<[u8; 32]>, ConfigError> {
 
 /// Refuses a key file whose permissions are more permissive than `0600`:
 /// any group/other bit set means the key is readable beyond its owner.
-/// On non-Unix platforms there is no portable permission bit to check, so
-/// the check is skipped there (and documented as such).
-fn check_key_file_permissions(path: &str) -> Result<(), ConfigError> {
+/// The mode is read from the OPEN file (`file.metadata()`), so the check
+/// and the later read see the same file. On non-Unix platforms there is
+/// no portable permission bit to check, so the check is skipped there
+/// (and documented as such).
+fn check_key_file_permissions(file: &std::fs::File, path: &str) -> Result<(), ConfigError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(path)
+        let mode = file
+            .metadata()
             .map_err(|e| ConfigError::VaultKeyFile(path.to_string(), e.to_string()))?
             .permissions()
             .mode();
@@ -239,7 +282,7 @@ fn check_key_file_permissions(path: &str) -> Result<(), ConfigError> {
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        let _ = (file, path);
         // No portable permission check exists on this platform; the file is
         // used as-is. Operators on Windows should use an ACL instead.
     }
@@ -315,10 +358,21 @@ pub fn parse_model_accounts(
         let kind = ModelKind::from_str(kind_text).ok_or_else(|| {
             ConfigError::BadModelAccount(format!(
                 "BASILEIA_MODEL_{var_account}_KIND is required and must be one of \
-                 openai_compatible|gemini|claude|ollama"
+                 openai_compatible|gemini|claude|ollama \
+                 (OpenRouter/Muse use openai_compatible with BASE_URL)"
             ))
         })?;
         let key = partial.key.clone().unwrap_or_default();
+        // Same rule as the Agora path (`model_ops.rs: validate_provision`):
+        // an ollama account carries no key, and a key handed to one is a
+        // configuration error — not something to silently store in the
+        // Vault.
+        if kind == ModelKind::Ollama && !key.trim().is_empty() {
+            return Err(ConfigError::BadModelAccount(format!(
+                "BASILEIA_MODEL_{var_account}_KEY must be empty for an ollama account: \
+                 an ollama account needs no key"
+            )));
+        }
         if kind != ModelKind::Ollama && key.trim().is_empty() {
             return Err(ConfigError::BadModelAccount(format!(
                 "BASILEIA_MODEL_{var_account}_KEY is required for a {kind} account and must not be empty"
@@ -444,8 +498,288 @@ mod tests {
         let err = parse_vault_key(&vars(&[("BASILEIA_VAULT_KEY", &short)])).unwrap_err();
         assert!(matches!(err, ConfigError::BadVaultKey(_)));
 
-        let err = parse_vault_key(&vars(&[("BASILEIA_VAULT_KEY", "")])).unwrap_err();
-        assert!(matches!(err, ConfigError::BadVaultKey(_)));
+        // An empty / whitespace-only env key is treated as ABSENT (A11):
+        // it falls back to the file, and with no file it is simply None.
+        assert!(parse_vault_key(&vars(&[("BASILEIA_VAULT_KEY", "")]))
+            .unwrap()
+            .is_none());
+        assert!(parse_vault_key(&vars(&[("BASILEIA_VAULT_KEY", "   ")]))
+            .unwrap()
+            .is_none());
+    }
+
+    /// Helper: writes `contents` to a fresh temp file with `mode` (unix)
+    /// and returns its path. The directory name carries a process-wide
+    /// counter, so tests running in parallel never share a path (and one
+    /// test cannot delete another's file mid-parse). The caller removes
+    /// the file and its dir.
+    #[cfg(unix)]
+    fn key_file(mode: u32, contents: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "basileia-vault-key-test-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("key.txt");
+        std::fs::write(&path, contents).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        (path, dir)
+    }
+
+    #[test]
+    fn an_empty_env_vault_key_falls_back_to_the_file() {
+        #[cfg(unix)]
+        {
+            let (path, dir) = key_file(0o600, &format!("{}\n", key_b64()));
+            let parsed = parse_vault_key(&vars(&[
+                ("BASILEIA_VAULT_KEY", ""),
+                ("BASILEIA_VAULT_KEY_FILE", path.to_str().unwrap()),
+            ]))
+            .unwrap()
+            .unwrap();
+            assert_eq!(&*parsed, &[7u8; 32]);
+            let parsed = parse_vault_key(&vars(&[
+                ("BASILEIA_VAULT_KEY", "   "),
+                ("BASILEIA_VAULT_KEY_FILE", path.to_str().unwrap()),
+            ]))
+            .unwrap()
+            .unwrap();
+            assert_eq!(&*parsed, &[7u8; 32]);
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn env_vault_key_wins_over_the_file_and_a_bad_file_is_ignored() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let other = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
+            let (path, dir) = key_file(0o600, &format!("{other}\n"));
+            // Both set, different keys: the env key wins.
+            let parsed = parse_vault_key(&vars(&[
+                ("BASILEIA_VAULT_KEY", &key_b64()),
+                ("BASILEIA_VAULT_KEY_FILE", path.to_str().unwrap()),
+            ]))
+            .unwrap()
+            .unwrap();
+            assert_eq!(&*parsed, &[7u8; 32]);
+
+            // Env set + file world-readable: the file is never consulted.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let parsed = parse_vault_key(&vars(&[
+                ("BASILEIA_VAULT_KEY", &key_b64()),
+                ("BASILEIA_VAULT_KEY_FILE", path.to_str().unwrap()),
+            ]))
+            .unwrap()
+            .unwrap();
+            assert_eq!(&*parsed, &[7u8; 32]);
+
+            // Env set + file missing: still the env key.
+            let parsed = parse_vault_key(&vars(&[
+                ("BASILEIA_VAULT_KEY", &key_b64()),
+                ("BASILEIA_VAULT_KEY_FILE", "/nonexistent/basileia-key.txt"),
+            ]))
+            .unwrap()
+            .unwrap();
+            assert_eq!(&*parsed, &[7u8; 32]);
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_world_readable_key_file_is_refused_without_ever_trusting_its_contents() {
+        #[cfg(unix)]
+        {
+            // Valid contents, wrong mode: refused (A1 — the permission
+            // check runs before the contents are trusted).
+            let (path, dir) = key_file(0o644, &format!("{}\n", key_b64()));
+            let err = parse_vault_key(&vars(&[(
+                "BASILEIA_VAULT_KEY_FILE",
+                path.to_str().unwrap(),
+            )]))
+            .unwrap_err();
+            assert!(matches!(err, ConfigError::VaultKeyFile(..)));
+            assert!(err.to_string().contains("0600"), "{err}");
+            assert!(!err.to_string().contains(&key_b64()), "{err}");
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn key_file_contents_and_modes_are_validated() {
+        #[cfg(unix)]
+        {
+            // Not base64.
+            let (path, dir) = key_file(0o600, "not-base64!!\n");
+            let err = parse_vault_key(&vars(&[(
+                "BASILEIA_VAULT_KEY_FILE",
+                path.to_str().unwrap(),
+            )]))
+            .unwrap_err();
+            assert!(matches!(err, ConfigError::VaultKeyFile(..)));
+            assert!(!err.to_string().contains("not-base64!!"), "{err}");
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir(&dir).unwrap();
+
+            // Empty file.
+            let (path, dir) = key_file(0o600, "");
+            let err = parse_vault_key(&vars(&[(
+                "BASILEIA_VAULT_KEY_FILE",
+                path.to_str().unwrap(),
+            )]))
+            .unwrap_err();
+            assert!(matches!(err, ConfigError::VaultKeyFile(..)));
+            assert!(err.to_string().contains("empty"), "{err}");
+            assert!(err.to_string().contains("generate-vault-key"), "{err}");
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir(&dir).unwrap();
+
+            // Whitespace-only file.
+            let (path, dir) = key_file(0o600, "  \n\t\n");
+            let err = parse_vault_key(&vars(&[(
+                "BASILEIA_VAULT_KEY_FILE",
+                path.to_str().unwrap(),
+            )]))
+            .unwrap_err();
+            assert!(matches!(err, ConfigError::VaultKeyFile(..)));
+            assert!(err.to_string().contains("empty"), "{err}");
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir(&dir).unwrap();
+
+            // Base64 of the wrong length (16 bytes, not 32).
+            let short = base64::engine::general_purpose::STANDARD.encode([7u8; 16]);
+            let (path, dir) = key_file(0o600, &format!("{short}\n"));
+            let err = parse_vault_key(&vars(&[(
+                "BASILEIA_VAULT_KEY_FILE",
+                path.to_str().unwrap(),
+            )]))
+            .unwrap_err();
+            assert!(matches!(err, ConfigError::VaultKeyFile(..)));
+            assert!(!err.to_string().contains(&short), "{err}");
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir(&dir).unwrap();
+
+            // Mode 0400 (owner read-only) is accepted.
+            let (path, dir) = key_file(0o400, &format!("{}\n", key_b64()));
+            let parsed = parse_vault_key(&vars(&[(
+                "BASILEIA_VAULT_KEY_FILE",
+                path.to_str().unwrap(),
+            )]))
+            .unwrap()
+            .unwrap();
+            assert_eq!(&*parsed, &[7u8; 32]);
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir(&dir).unwrap();
+
+            // Any group bit is refused: 0660 and 0640 alike.
+            for mode in [0o660, 0o640] {
+                let (path, dir) = key_file(mode, &format!("{}\n", key_b64()));
+                let err = parse_vault_key(&vars(&[(
+                    "BASILEIA_VAULT_KEY_FILE",
+                    path.to_str().unwrap(),
+                )]))
+                .unwrap_err();
+                assert!(matches!(err, ConfigError::VaultKeyFile(..)));
+                assert!(err.to_string().contains("0600"), "{err}");
+                std::fs::remove_file(&path).unwrap();
+                std::fs::remove_dir(&dir).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_key_file_error_names_the_variable_and_suggests_a_fix() {
+        let err = parse_vault_key(&vars(&[(
+            "BASILEIA_VAULT_KEY_FILE",
+            "/nonexistent/basileia-key.txt",
+        )]))
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::VaultKeyFile(..)));
+        assert!(err.to_string().contains("BASILEIA_VAULT_KEY_FILE"), "{err}");
+        assert!(err.to_string().contains("generate-vault-key"), "{err}");
+    }
+
+    #[test]
+    fn an_ollama_account_with_a_key_is_rejected_like_the_agora_path() {
+        let err = parse_model_accounts(&vars(&[
+            ("BASILEIA_MODEL_LOCAL_KEY", CANARY),
+            ("BASILEIA_MODEL_LOCAL_KIND", "ollama"),
+        ]))
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::BadModelAccount(_)));
+        assert!(
+            err.to_string().contains("BASILEIA_MODEL_LOCAL_KEY"),
+            "{err}"
+        );
+        assert!(
+            err.to_string().contains("an ollama account needs no key"),
+            "{err}"
+        );
+        assert!(!err.to_string().contains(CANARY), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_kind_error_points_at_openai_compatible_for_openrouter() {
+        let err = parse_model_accounts(&vars(&[
+            ("BASILEIA_MODEL_MAIN_KEY", CANARY),
+            ("BASILEIA_MODEL_MAIN_KIND", "bedrock"),
+        ]))
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::BadModelAccount(_)));
+        assert!(
+            err.to_string()
+                .contains("(OpenRouter/Muse use openai_compatible with BASE_URL)"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn openrouter_muse_account_provisions_with_its_own_base_url_and_model() {
+        // The model name lives in the TEST only: no model name is ever
+        // defaulted in production code (ADR 0022/0023).
+        let accounts = parse_model_accounts(&vars(&[
+            ("BASILEIA_MODEL_MUSE_KEY", "sk-canary-openrouter"),
+            ("BASILEIA_MODEL_MUSE_KIND", "openai_compatible"),
+            (
+                "BASILEIA_MODEL_MUSE_BASE_URL",
+                "https://openrouter.ai/api/v1",
+            ),
+            ("BASILEIA_MODEL_MUSE_MODEL", "meta/muse-spark-open"),
+        ]))
+        .unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].name, "muse");
+        assert_eq!(accounts[0].kind, ModelKind::OpenAiCompatible);
+        assert_eq!(accounts[0].base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(accounts[0].default_model, "meta/muse-spark-open");
+        assert_eq!(accounts[0].key, "sk-canary-openrouter");
+    }
+
+    #[test]
+    fn default_base_urls_are_the_four_known_roots() {
+        assert_eq!(
+            default_base_url(ModelKind::OpenAiCompatible),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            default_base_url(ModelKind::Gemini),
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+        assert_eq!(
+            default_base_url(ModelKind::Claude),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            default_base_url(ModelKind::Ollama),
+            "http://127.0.0.1:11434"
+        );
     }
 
     #[test]

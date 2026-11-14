@@ -7,6 +7,23 @@ use std::net::SocketAddr;
 
 use basileia::{assemble, Config, Error};
 
+/// Validates the arguments of the `generate-vault-key` subcommand: it
+/// takes no further arguments. Anything after it is a usage error — the
+/// caller prints the message to stderr and exits non-zero, instead of
+/// silently ignoring the extra arguments.
+fn check_generate_vault_key_args(argv: &[String]) -> Result<(), String> {
+    if argv.get(1).map(String::as_str) != Some("generate-vault-key") {
+        return Ok(());
+    }
+    if argv.len() > 2 {
+        return Err(format!(
+            "usage: basileia generate-vault-key (takes no arguments); got: {}",
+            argv[2..].join(" ")
+        ));
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     // `basileia generate-vault-key` prints base64 of 32 random bytes (ADR
@@ -15,6 +32,11 @@ async fn main() {
     // `BASILEIA_VAULT_KEY` or a 0600 file read via
     // `BASILEIA_VAULT_KEY_FILE`.
     if std::env::args().nth(1).as_deref() == Some("generate-vault-key") {
+        let argv: Vec<String> = std::env::args().collect();
+        if let Err(usage) = check_generate_vault_key_args(&argv) {
+            eprintln!("basileia: {usage}");
+            std::process::exit(2);
+        }
         let mut key = zeroize::Zeroizing::new([0u8; 32]);
         if let Err(error) = getrandom::fill(&mut *key) {
             eprintln!("basileia: cannot generate a vault key: {error}");
@@ -49,4 +71,36 @@ async fn run() -> Result<(), Error> {
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn generate_vault_key_rejects_extra_arguments() {
+        assert!(check_generate_vault_key_args(&argv(&["basileia", "generate-vault-key"])).is_ok());
+        let err =
+            check_generate_vault_key_args(&argv(&["basileia", "generate-vault-key", "--force"]))
+                .unwrap_err();
+        assert!(err.contains("usage: basileia generate-vault-key"), "{err}");
+        assert!(err.contains("--force"), "{err}");
+        let err = check_generate_vault_key_args(&argv(&[
+            "basileia",
+            "generate-vault-key",
+            "extra",
+            "args",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("usage: basileia generate-vault-key"), "{err}");
+        // No subcommand, or another subcommand, is untouched.
+        assert!(check_generate_vault_key_args(&argv(&["basileia"])).is_ok());
+        assert!(
+            check_generate_vault_key_args(&argv(&["basileia", "serve", "--port", "8080"])).is_ok()
+        );
+    }
 }
