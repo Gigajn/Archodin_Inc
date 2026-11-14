@@ -76,7 +76,7 @@ Each account is four variables, named after its slug (`<ACCOUNT>` is
 | Variable | Meaning |
 |---|---|
 | `BASILEIA_MODEL_<ACCOUNT>_KEY` | API key (required, except `ollama`). Never commit it; `sk-canary-…` below is a placeholder. |
-| `BASILEIA_MODEL_<ACCOUNT>_KIND` | `openai_compatible`, `gemini`, `claude`, or `ollama`. |
+| `BASILEIA_MODEL_<ACCOUNT>_KIND` | `openai_compatible`, `gemini`, `claude`, `ollama`, or `openrouter`. |
 | `BASILEIA_MODEL_<ACCOUNT>_BASE_URL` | Optional — when empty, the per-kind default is used (see below). |
 | `BASILEIA_MODEL_<ACCOUNT>_MODEL` | The model name. **A model name never has a default** (ADR 0022/0023, ADR 0026): it must always be written explicitly, here or per Role in the chain. A missing model fails loudly instead of guessing one. |
 
@@ -84,7 +84,8 @@ Per-kind default `BASE_URL` (you may leave `BASE_URL` empty when you
 use the default): `openai_compatible` →
 `https://api.openai.com/v1`, `gemini` →
 `https://generativelanguage.googleapis.com/v1beta`, `claude` →
-`https://api.anthropic.com`, `ollama` → `http://127.0.0.1:11434`.
+`https://api.anthropic.com`, `ollama` → `http://127.0.0.1:11434`,
+`openrouter` → `https://openrouter.ai/api/v1`.
 
 ### Vault key file (runbook)
 
@@ -140,22 +141,23 @@ BASILEIA_MODEL_chatgpt_KEY='sk-canary-openai'
 BASILEIA_MODEL_chatgpt_KIND='openai_compatible'
 BASILEIA_MODEL_chatgpt_MODEL='<nama-model-openai>'
 
-# Muse (Meta, via OpenRouter — kind openai_compatible, ADR 0026).
-# BASE_URL MUST be set here: the default for openai_compatible is
-# OpenAI's, not OpenRouter's. MODEL below is a configuration example,
-# not a code default.
+# Muse (Meta, via OpenRouter — kind openrouter, ADR 0027).
+# BASE_URL may be omitted: it defaults to
+# https://openrouter.ai/api/v1. MODEL below is a configuration
+# example, not a code default.
 BASILEIA_MODEL_muse_KEY='sk-canary-openrouter'
-BASILEIA_MODEL_muse_KIND='openai_compatible'
-BASILEIA_MODEL_muse_BASE_URL='https://openrouter.ai/api/v1'
+BASILEIA_MODEL_muse_KIND='openrouter'
 BASILEIA_MODEL_muse_MODEL='meta/muse-spark-open'
 ```
 
 Notes:
 
-- There is no `muse` or `openrouter` kind on purpose (ADR 0026):
-  a kind is the shape of the API, not a model name. Anything that
-  speaks the OpenAI API — including OpenRouter — is
-  `openai_compatible` + `BASE_URL`.
+- There is no `muse` kind on purpose (ADR 0026): a kind is the shape
+  of the API, not a model name. But there IS an `openrouter` kind
+  (ADR 0027): OpenRouter still speaks the OpenAI API, yet it gets its
+  own kind because it behaves differently on the wire — it sends
+  attribution headers (see below) and defaults to
+  `https://openrouter.ai/api/v1`.
 - A `402` from a provider (no credits, typical of OpenRouter) is
   reported as its own error (`ProviderPaymentRequired` / health status
   `payment_required`): top the account up, do not chase the network
@@ -164,6 +166,19 @@ Notes:
   is public and does not validate the key, so an `ok` health check
   there is not proof the key is valid. Health checks have never been
   run against a live provider yet — verify them by hand (C4).
+
+### Attribution (OpenRouter)
+
+Every chat completion sent through an `openrouter` account carries
+two attribution headers (ADR 0027): `HTTP-Referer:
+https://github.com/Gigajn/Archodin_Inc` (this repo's URL, the
+application's public identifier) and `X-OpenRouter-Title: Basileia`
+(`X-Title` is only the legacy alias). The values are constants —
+there is no env var for them — and they are sent only for the
+`openrouter` kind, never for `openai_compatible` or any other kind.
+Health checks do not send attribution headers. Without
+`HTTP-Referer`, OpenRouter cannot show the application's page or
+ranking, but requests still work.
 
 ### Ollama (local models) — reserved for later
 

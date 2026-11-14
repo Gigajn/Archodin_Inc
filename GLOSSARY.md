@@ -105,25 +105,40 @@ _Avoid_: Terkunci, mode aman
 
 **Kind**:
 Bentuk API yang dipakai satu akun model — bukan nama vendor dan bukan
-nama model. Hanya empat kind di v1: `openai_compatible` (vendor apa pun
-yang bicara API OpenAI: OpenAI, OpenRouter, Groq, DeepSeek, …),
-`gemini`, `claude`, dan `ollama`. Kind baru hanya ditambahkan bila ada
-bentuk API baru yang tidak tercakup keempatnya (ADR 0022, ADR 0026).
+nama model. Kini lima kind: `openai_compatible` (vendor apa pun yang
+bicara API OpenAI: OpenAI, Groq, DeepSeek, …), `gemini`, `claude`,
+`ollama`, dan `openrouter` (OpenAI-compatible + atribusi aplikasi:
+default `https://openrouter.ai/api/v1`, otomatis mengirim
+`HTTP-Referer`/`X-OpenRouter-Title`). Kind baru hanya ditambahkan bila
+ada bentuk API baru yang tidak tercakup kind sebelumnya (ADR 0022,
+ADR 0026) — `openrouter` memenuhi syarat karena perilakunya di wire
+berbeda: header atribusi dan endpoint default (ADR 0027).
 _Avoid_: Provider type, vendor
 
 **OpenRouter**:
 Gateway yang menjual akses ke banyak model lewat satu API
-OpenAI-compatible. Dijangkau lewat kind `openai_compatible` +
-`BASE_URL=https://openrouter.ai/api/v1` — **bukan** kind sendiri
-(ADR 0026: kind `openrouter` ditunda sebagai ADR masa depan). Health
+OpenAI-compatible. Kini kind sendiri (ADR 0027): `KIND=openrouter` +
+`BASE_URL` opsional (default `https://openrouter.ai/api/v1`) + nama
+model ditulis eksplisit, mis. `MODEL=meta/muse-spark-open`. Health
 check-nya bisa positif palsu: `GET /v1/models` OpenRouter bersifat
 publik dan tidak memvalidasi kunci.
 _Avoid_: Provider Muse, gateway
 
+**Atribusi (OpenRouter)** / **Attribution**:
+Dua header yang menandai aplikasi ini di OpenRouter — `HTTP-Referer`
+(`https://github.com/Gigajn/Archodin_Inc`, URL repo sebagai pengenal
+publik aplikasi) dan `X-OpenRouter-Title` (`Basileia`; `X-Title` hanya
+alias lama). Nilainya konstanta, tanpa env var baru, dan dikirim
+otomatis di setiap chat completion — tetapi **hanya** untuk akun kind
+`openrouter`; health check tidak mengirim header atribusi. Tanpa
+`HTTP-Referer`, OpenRouter tidak bisa menampilkan halaman aplikasi /
+ranking, tetapi request tetap jalan.
+_Avoid_: Header pelacak, analytics
+
 **Muse**:
-Keluarga model Meta. Dipakai lewat OpenRouter (kind
-`openai_compatible`, `BASE_URL=https://openrouter.ai/api/v1`) dengan
-nama model ditulis eksplisit, mis. `MODEL=meta/muse-spark-open` sebagai
+Keluarga model Meta. Dipakai lewat OpenRouter (kind `openrouter`,
+`BASE_URL` boleh kosong karena default-nya OpenRouter) dengan nama
+model ditulis eksplisit, mis. `MODEL=meta/muse-spark-open` sebagai
 contoh konfigurasi — bukan default. Tidak ada kind `muse`
 (ADR 0026: ditolak eksplisit — kind adalah bentuk API, bukan nama model).
 _Avoid_: Model Meta, kind Muse
@@ -145,7 +160,7 @@ _Avoid_: Katalog model, routing table
 
 **Akun model**:
 Satu kredensial untuk satu provider: kind (`openai_compatible`, `gemini`,
-`claude`, `ollama`), base URL, model default, dan satu nama secret di Vault.
+`claude`, `ollama`, `openrouter`), base URL, model default, dan satu nama secret di Vault.
 Satu provider boleh punya beberapa akun. Model default akun boleh kosong
 bila model ditetapkan per Role di chain — tetapi nama modelnya sendiri
 tidak pernah ditebak: lihat "Nama model eksplisit".

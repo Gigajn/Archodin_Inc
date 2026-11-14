@@ -60,12 +60,16 @@ mod performance;
 pub use performance::{AgentFigures, CitedProposal, PerformanceLedger, PerformanceReport};
 
 mod roster;
-pub use roster::{branch_name, Agent, Role, Roster, RosterError, MAX_HISTORY_MESSAGES, DEFAULT_ROLE_BUDGET_TOKENS};
+pub use roster::{
+    branch_name, Agent, Role, Roster, RosterError, DEFAULT_ROLE_BUDGET_TOKENS, MAX_HISTORY_MESSAGES,
+};
 
 mod vault;
 pub use vault::{Secret, Vault, VaultError};
 
 mod agent;
+mod attribution;
+pub use attribution::{Attribution, AttributionError};
 mod chain;
 mod gemini;
 mod native;
@@ -420,11 +424,7 @@ impl<S: Clone + Send + 'static> Graph<S> {
                             }
                         };
                         match next {
-                            Err(error) => (
-                                Some(JobEvent::JobFailed { error }),
-                                Phase::Done,
-                                steps,
-                            ),
+                            Err(error) => (Some(JobEvent::JobFailed { error }), Phase::Done, steps),
                             Ok(next) => {
                                 let phase = if next == END {
                                     Phase::Finish(s)
@@ -435,11 +435,9 @@ impl<S: Clone + Send + 'static> Graph<S> {
                             }
                         }
                     }
-                    Phase::Finish(s) => (
-                        Some(JobEvent::JobFinished { state: s }),
-                        Phase::Done,
-                        steps,
-                    ),
+                    Phase::Finish(s) => {
+                        (Some(JobEvent::JobFinished { state: s }), Phase::Done, steps)
+                    }
                     Phase::Done => return None,
                 };
                 Some((event, Run { phase, steps }))

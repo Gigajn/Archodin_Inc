@@ -18,6 +18,7 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
+use crate::attribution::Attribution;
 use crate::chain::{ChainEvent, ModelChain, ModelPair};
 use crate::http_guard::validate_endpoint;
 use crate::registry::{ModelError, ModelKind};
@@ -49,6 +50,11 @@ pub struct Provider {
     /// Whether a call needs a key at all: false only for Ollama, which has
     /// no auth. Every other kind refuses an empty key in [`Provider::validate`].
     key_required: bool,
+    /// The OpenRouter attribution headers (`HTTP-Referer` /
+    /// `X-OpenRouter-Title`), set only for kind `openrouter`
+    /// (ADR 0027): `None` for every other kind, so no other vendor ever
+    /// sees Basileia's identity.
+    attribution: Option<Attribution>,
 }
 
 impl Provider {
@@ -74,6 +80,7 @@ impl Provider {
             native: None,
             kind: Some(ModelKind::OpenAiCompatible),
             key_required: true,
+            attribution: None,
         }
     }
 
@@ -87,6 +94,46 @@ impl Provider {
         model: impl Into<String>,
     ) -> Result<Self, ModelError> {
         let provider = Self::openai_compatible(base_url, api_key, model);
+        provider.validate()?;
+        Ok(provider)
+    }
+
+    /// An OpenRouter Provider: the OpenAI-compatible API at
+    /// `https://openrouter.ai/api/v1` (or another root the caller passes),
+    /// with the `HTTP-Referer` / `X-OpenRouter-Title` attribution headers
+    /// on every chat completion (ADR 0027). The model name is explicit,
+    /// as everywhere: no model is ever defaulted (ADR 0022/0023).
+    ///
+    /// Like [`Provider::openai_compatible`], this constructor does NOT
+    /// validate: use [`Provider::try_openrouter`] for the checked build.
+    pub fn openrouter(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            api_key: KeySource::Fixed(api_key.into()),
+            model: model.into(),
+            account: None,
+            pricing: None,
+            native: None,
+            kind: Some(ModelKind::OpenRouter),
+            key_required: true,
+            attribution: Some(Attribution::default()),
+        }
+    }
+
+    /// Like [`Provider::openrouter`], but refuses a Provider that could
+    /// not serve a call: an empty or invalid base URL, an empty model
+    /// name, or an empty key. The error names the kind, account and
+    /// model — never the key.
+    pub fn try_openrouter(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Result<Self, ModelError> {
+        let provider = Self::openrouter(base_url, api_key, model);
         provider.validate()?;
         Ok(provider)
     }
@@ -169,6 +216,7 @@ impl Provider {
             // and `validate` falls back to the `openai_compatible` label.
             kind: None,
             key_required: true,
+            attribution: None,
         }
     }
 
@@ -244,9 +292,27 @@ impl Provider {
             }
             return Ok(llm);
         }
-        let config = OpenAIConfig::new()
+        // OpenRouter attribution (ADR 0027 §D1/D5): the two headers ride
+        // on the public `OpenAIConfig::with_header` — no fork patch —
+        // custom headers win over the defaults and travel on every
+        // request. Fail-closed: a header that cannot be set is an
+        // error, never a silent request to OpenRouter without
+        // attribution. Any other kind has `attribution: None` and
+        // sends no header at all.
+        let mut config = OpenAIConfig::new()
             .with_api_base(&self.base_url)
             .with_api_key(key);
+        if let Some(attribution) = &self.attribution {
+            for (name, value) in attribution.headers() {
+                let value = value.to_str().map_err(|_| {
+                    "the OpenRouter attribution header holds a value that cannot travel as a header"
+                        .to_string()
+                })?;
+                config = config
+                    .with_header(name, value)
+                    .map_err(|e| format!("could not set the OpenRouter attribution header: {e}"))?;
+            }
+        }
         // Every OpenAI-compatible call goes through the guarded client
         // (ADR 0025 §3): 30 s timeout, 2 MiB cap, http-acl SSRF filtering.
         // A client that cannot be built is an error, never a silent
@@ -565,8 +631,7 @@ mod tests {
 
     #[test]
     fn a_fixed_api_key_is_redacted_from_error_text() {
-        let provider =
-            Provider::openai_compatible("http://localhost:9/v1", "sk-fixed-secret", "m");
+        let provider = Provider::openai_compatible("http://localhost:9/v1", "sk-fixed-secret", "m");
         assert_eq!(
             provider.redact("provider error: bad key sk-fixed-secret".to_string()),
             "provider error: bad key [redacted]"
@@ -606,6 +671,31 @@ mod tests {
             Provider::from_vault("http://localhost:9/v1", &vault, "work", "m")
                 .validate()
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn try_openrouter_accepts_a_well_shaped_provider_and_names_its_kind() {
+        // Mirror of `try_openai_compatible_accepts_a_well_shaped_provider`,
+        // with the kind now `openrouter` (ADR 0027): validation errors
+        // must name that kind, never the key.
+        let provider = Provider::try_openrouter("http://localhost:9/v1", "sk-key", "m").unwrap();
+        assert!(provider.validate().is_ok());
+        assert_eq!(
+            Provider::try_openrouter("", "sk-key", "m")
+                .unwrap_err()
+                .kind(),
+            Some(ModelKind::OpenRouter)
+        );
+        assert_eq!(
+            Provider::try_openrouter("http://localhost:9/v1", "", "m").unwrap_err(),
+            ModelError::key_missing(ModelKind::OpenRouter, "http://localhost:9/v1", "m")
+        );
+        assert_eq!(
+            Provider::try_openrouter("http://localhost:9/v1", "sk-key", "")
+                .unwrap_err()
+                .kind(),
+            Some(ModelKind::OpenRouter)
         );
     }
 

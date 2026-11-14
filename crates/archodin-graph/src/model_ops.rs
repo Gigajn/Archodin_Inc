@@ -67,6 +67,7 @@ pub fn default_base_url(kind: ModelKind) -> &'static str {
         ModelKind::Gemini => "https://generativelanguage.googleapis.com/v1beta",
         ModelKind::Claude => "https://api.anthropic.com",
         ModelKind::Ollama => "http://127.0.0.1:11434",
+        ModelKind::OpenRouter => "https://openrouter.ai/api/v1",
     }
 }
 
@@ -76,7 +77,8 @@ pub fn default_base_url(kind: ModelKind) -> &'static str {
 pub struct ProvisionInput {
     /// Slug akun, `[a-z0-9_]+`.
     pub name: String,
-    /// Spelling kind: `openai_compatible`, `gemini`, `claude`, `ollama`.
+    /// Spelling kind: `openai_compatible`, `gemini`, `claude`, `ollama`,
+    /// `openrouter`.
     pub kind: String,
     /// API root; kosong berarti default per kind.
     pub base_url: Option<String>,
@@ -129,7 +131,7 @@ pub fn validate_provision(input: ProvisionInput) -> Result<ValidatedProvision, M
             ModelKind::OpenAiCompatible,
             &input.name,
             "",
-            "kind is required and must be one of openai_compatible|gemini|claude|ollama (OpenRouter/Muse use openai_compatible with BASE_URL)",
+            "kind is required and must be one of openai_compatible|gemini|claude|ollama|openrouter (OpenRouter accounts use kind openrouter; Muse has no kind of its own)",
         )
     })?;
     let key = input.key.unwrap_or_default();
@@ -381,6 +383,9 @@ pub fn health_url(account: &ModelAccount) -> String {
     let base = account.base_url.trim_end_matches('/');
     let (base, suffix) = match account.kind {
         ModelKind::OpenAiCompatible => (base.strip_suffix("/v1").unwrap_or(base), "/v1/models"),
+        // OpenRouter reuses the `openai_compatible` shape: its root ends
+        // in `/v1`, so the same strip-then-append applies (ADR 0027).
+        ModelKind::OpenRouter => (base.strip_suffix("/v1").unwrap_or(base), "/v1/models"),
         ModelKind::Gemini => (
             base.strip_suffix("/v1beta").unwrap_or(base),
             "/v1beta/models",
@@ -424,7 +429,11 @@ pub async fn health_check(
     let client = shared_client()?;
     let mut request = client.get(health_url(account));
     match account.kind {
-        ModelKind::OpenAiCompatible => {
+        // OpenRouter authenticates like any OpenAI-compatible API
+        // (Bearer key) — and a health check sends NO attribution
+        // headers: attribution belongs to chat completions only
+        // (ADR 0027 §D4).
+        ModelKind::OpenAiCompatible | ModelKind::OpenRouter => {
             if let Some(key) = &key {
                 request = request.bearer_auth(key);
             }
@@ -608,12 +617,13 @@ mod tests {
     }
 
     #[test]
-    fn default_base_urls_match_the_spec_for_all_four_kinds() {
-        // Test kesepakatan (ADR 0026 / C1): `default_base_url` di sini
-        // diduplikasi di `basileia::config::default_base_url` — dua test
-        // literal ini bersama-sama mendeteksi drift antara keduanya.
-        // Nilai-nilai di bawah adalah sumber kebenaran independen
-        // (dok vendor / ADR 0020 §Decision 2), bukan salinan dari kode.
+    fn default_base_urls_match_the_spec_for_all_five_kinds() {
+        // Test kesepakatan (ADR 0026 / C1, diamandemen ADR 0027):
+        // `default_base_url` di sini diduplikasi di
+        // `basileia::config::default_base_url` — dua test literal ini
+        // bersama-sama mendeteksi drift antara keduanya. Nilai-nilai di
+        // bawah adalah sumber kebenaran independen (dok vendor /
+        // ADR 0020 §Decision 2), bukan salinan dari kode.
         assert_eq!(
             default_base_url(ModelKind::OpenAiCompatible),
             "https://api.openai.com/v1"
@@ -630,6 +640,10 @@ mod tests {
             default_base_url(ModelKind::Ollama),
             "http://127.0.0.1:11434"
         );
+        assert_eq!(
+            default_base_url(ModelKind::OpenRouter),
+            "https://openrouter.ai/api/v1"
+        );
     }
 
     #[test]
@@ -644,23 +658,38 @@ mod tests {
     }
 
     #[test]
-    fn unknown_kind_errors_point_openrouter_users_to_openai_compatible() {
-        // OpenRouter and Muse have no kind of their own (ADR 0026): they
-        // are reached through `openai_compatible` + BASE_URL, so the error
-        // for an unknown kind must say so instead of only listing kinds.
-        let err =
-            validate_provision(provision_input("main", "openrouter", Some("sk-x"))).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("(OpenRouter/Muse use openai_compatible with BASE_URL)"),
-            "{err}"
-        );
-        let err = validate_provision(provision_input("main", "muse", Some("sk-x"))).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("(OpenRouter/Muse use openai_compatible with BASE_URL)"),
-            "{err}"
-        );
+    fn openrouter_is_accepted_as_its_own_kind() {
+        // ADR 0027: `openrouter` is a kind now (it changes behaviour —
+        // attribution headers), so provisioning it succeeds and the
+        // base URL defaults to the OpenRouter root, no BASE_URL needed.
+        let validated =
+            validate_provision(provision_input("main", "openrouter", Some("sk-x"))).unwrap();
+        assert_eq!(validated.account.kind, ModelKind::OpenRouter);
+        assert_eq!(validated.account.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(validated.account.vault_secret, "model/openrouter/main");
+        assert_eq!(validated.key.as_deref(), Some("sk-x"));
+    }
+
+    #[test]
+    fn muse_still_has_no_kind_and_unknown_kinds_name_all_five() {
+        // Kind is an API shape, never a model name (ADR 0022/0026):
+        // `muse` stays rejected — the error must now point at kind
+        // `openrouter` (no longer at `openai_compatible` + BASE_URL)
+        // and list all five kinds.
+        for bad in ["muse", "bedrock"] {
+            let err = validate_provision(provision_input("main", bad, Some("sk-x"))).unwrap_err();
+            assert!(err.to_string().contains("openrouter"), "{bad}: {err}");
+            assert!(
+                err.to_string()
+                    .contains("openai_compatible|gemini|claude|ollama|openrouter"),
+                "{bad}: {err}"
+            );
+            assert!(
+                !err.to_string()
+                    .contains("(OpenRouter/Muse use openai_compatible with BASE_URL)"),
+                "{bad}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -764,6 +793,16 @@ mod tests {
             "llama3.2",
         );
         assert_eq!(health_url(&ollama), "http://127.0.0.1:11434/api/tags");
+        let openrouter = ModelAccount::new(
+            "openrouter",
+            ModelKind::OpenRouter,
+            "https://openrouter.ai/api/v1",
+            "meta/muse-spark-open",
+        );
+        assert_eq!(
+            health_url(&openrouter),
+            "https://openrouter.ai/api/v1/models"
+        );
     }
 
     #[test]
@@ -853,14 +892,13 @@ mod tests {
 
     #[test]
     fn health_check_for_an_openrouter_account_uses_one_v1_segment_and_bearer() {
-        // C9: an OpenRouter account is an `openai_compatible` account with
-        // BASE_URL `https://openrouter.ai/api/v1` and an explicit model
-        // (here `meta/muse-spark-open`, in the TEST only — no model name
-        // is ever a code default). The health URL must be
+        // ADR 0027 (7e): an OpenRouter account is now kind `openrouter`
+        // (model name in the TEST only — no model name is ever a code
+        // default). The health URL must be
         // `https://openrouter.ai/api/v1/models`, never `/api/v1/v1/models`.
         let openrouter = ModelAccount::new(
             "openrouter",
-            ModelKind::OpenAiCompatible,
+            ModelKind::OpenRouter,
             "https://openrouter.ai/api/v1",
             "meta/muse-spark-open",
         );
@@ -871,13 +909,15 @@ mod tests {
 
         // The same base shape against a local mock: `/api/v1` + `/v1/models`
         // collapses to `/api/v1/models`, the Bearer key is sent, 200 → ok.
+        // Attribution headers are NOT sent on a health check (ADR 0027 §D4):
+        // the `Matcher::Missing` assertions below pin that down.
         let mut server = mockito::Server::new();
         let base = format!("{}/api/v1", server.url());
         let vault = Vault::new([7; 32].into());
-        vault.put("model/openai_compatible/openrouter", "sk-canary-openrouter");
+        vault.put("model/openrouter/openrouter", "sk-canary-openrouter");
         let account = ModelAccount::new(
             "openrouter",
-            ModelKind::OpenAiCompatible,
+            ModelKind::OpenRouter,
             &base,
             "meta/muse-spark-open",
         );
@@ -888,6 +928,8 @@ mod tests {
         let mock = server
             .mock("GET", "/api/v1/models")
             .match_header("authorization", "Bearer sk-canary-openrouter")
+            .match_header("http-referer", mockito::Matcher::Missing)
+            .match_header("x-openrouter-title", mockito::Matcher::Missing)
             .with_status(200)
             .create();
         let outcome = run_blocking(health_check(&vault, &account)).unwrap();

@@ -24,7 +24,11 @@ use std::collections::HashMap;
 use crate::http_guard::validate_endpoint;
 
 /// The kind of a model account: which provider API it speaks (ADR 0022).
-/// Only these four kinds exist in v1; Bedrock and Vertex AI are deferred.
+/// Only these five kinds exist in v1; Bedrock and Vertex AI are deferred.
+/// `OpenRouter` is `openai_compatible` plus the attribution headers
+/// (ADR 0027) — it is a kind of its own because it changes behaviour,
+/// not just a base URL, and `muse` stays rejected: a kind is an API
+/// shape, never a model name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModelKind {
     /// Any vendor reached by base URL, API key and model name.
@@ -35,17 +39,22 @@ pub enum ModelKind {
     Claude,
     /// A local Ollama server, no key.
     Ollama,
+    /// OpenRouter: the OpenAI-compatible API at
+    /// `https://openrouter.ai/api/v1`, with the `HTTP-Referer` /
+    /// `X-OpenRouter-Title` attribution headers on chat completions.
+    OpenRouter,
 }
 
 impl ModelKind {
     /// The kind as it is written in configuration: `openai_compatible`,
-    /// `gemini`, `claude`, `ollama`.
+    /// `gemini`, `claude`, `ollama`, `openrouter`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OpenAiCompatible => "openai_compatible",
             Self::Gemini => "gemini",
             Self::Claude => "claude",
             Self::Ollama => "ollama",
+            Self::OpenRouter => "openrouter",
         }
     }
 
@@ -57,6 +66,7 @@ impl ModelKind {
             "gemini" => Some(Self::Gemini),
             "claude" => Some(Self::Claude),
             "ollama" => Some(Self::Ollama),
+            "openrouter" => Some(Self::OpenRouter),
             _ => None,
         }
     }
@@ -704,10 +714,12 @@ mod tests {
             ModelKind::Gemini,
             ModelKind::Claude,
             ModelKind::Ollama,
+            ModelKind::OpenRouter,
         ] {
             assert_eq!(ModelKind::from_str(kind.as_str()), Some(kind));
         }
         assert_eq!(ModelKind::from_str("bedrock"), None);
+        assert_eq!(ModelKind::from_str("muse"), None);
         assert_eq!(ModelKind::from_str(""), None);
         assert_eq!(
             ModelAccount::vault_secret_name(ModelKind::Claude, "work"),

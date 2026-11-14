@@ -9,16 +9,17 @@
 //! | `BASILEIA_VAULT_KEY` | *(none)* | The Vault key: base64 of 32 random bytes. Takes precedence over `BASILEIA_VAULT_KEY_FILE` when both are set and non-empty; an empty / whitespace-only value counts as absent and falls back to the file (ADR 0021 amendment 2026-11-14). This inline key is only the FALLBACK — the chosen path on a home server is the 0600 file via `BASILEIA_VAULT_KEY_FILE`. Never logged; held as `Zeroizing<[u8; 32]>` and wiped after `Vault::new`. |
 //! | `BASILEIA_VAULT_KEY_FILE` | *(none)* | The CHOSEN path for the Vault key on a home server (ADR 0021 amendment 2026-11-14): a file holding the base64 Vault key (one line). The file must be mode `0600` — a more permissive file is refused at startup, and its permissions are checked on the open file before its contents are read. Only read when `BASILEIA_VAULT_KEY` is absent or empty. Generate the key with `basileia generate-vault-key` and write it to the file. |
 //! | `BASILEIA_MODEL_<ACCOUNT>_KEY` | *(required per account)* | The API key of one model account (ADR 0020). `<ACCOUNT>` is a lowercase slug (`main`, `groq_cepat`). Required for every kind except `ollama`, which needs no key — and a key handed to an `ollama` account is a configuration error. |
-//! | `BASILEIA_MODEL_<ACCOUNT>_KIND` | *(required per account)* | `openai_compatible`, `gemini`, `claude`, or `ollama`. |
+//! | `BASILEIA_MODEL_<ACCOUNT>_KIND` | *(required per account)* | `openai_compatible`, `gemini`, `claude`, `ollama`, or `openrouter`. |
 //! | `BASILEIA_MODEL_<ACCOUNT>_BASE_URL` | *(default per kind)* | Optional; when set it must pass `http_guard::validate_endpoint` (checked through `ModelAccount::validate`). Empty means the per-kind default. |
 //! | `BASILEIA_MODEL_<ACCOUNT>_MODEL` | *(optional)* | The account's default model. May be empty when the model is set per Role instead (ADR 0023) — such an account's key still lands in the Vault, but it is only registered in the Registry once a model is set. A model name is NEVER defaulted anywhere: model names are configuration, never a hardcoded catalogue (ADR 0022/0023).
 //!
 //! Recipe — Muse through OpenRouter (the model name here is an example in
-//! documentation, not a default in code):
+//! documentation, not a default in code; ADR 0027: `openrouter` is a kind
+//! of its own now, so `BASE_URL` is optional — it defaults to the
+//! OpenRouter root):
 //! ```text
 //! BASILEIA_MODEL_MUSE_KEY=sk-canary-…
-//! BASILEIA_MODEL_MUSE_KIND=openai_compatible
-//! BASILEIA_MODEL_MUSE_BASE_URL=https://openrouter.ai/api/v1
+//! BASILEIA_MODEL_MUSE_KIND=openrouter
 //! BASILEIA_MODEL_MUSE_MODEL=meta/muse-spark-open
 //! ```
 //!
@@ -99,6 +100,7 @@ pub fn default_base_url(kind: ModelKind) -> &'static str {
         ModelKind::Gemini => "https://generativelanguage.googleapis.com/v1beta",
         ModelKind::Claude => "https://api.anthropic.com",
         ModelKind::Ollama => "http://127.0.0.1:11434",
+        ModelKind::OpenRouter => "https://openrouter.ai/api/v1",
     }
 }
 
@@ -358,8 +360,8 @@ pub fn parse_model_accounts(
         let kind = ModelKind::from_str(kind_text).ok_or_else(|| {
             ConfigError::BadModelAccount(format!(
                 "BASILEIA_MODEL_{var_account}_KIND is required and must be one of \
-                 openai_compatible|gemini|claude|ollama \
-                 (OpenRouter/Muse use openai_compatible with BASE_URL)"
+                 openai_compatible|gemini|claude|ollama|openrouter \
+                 (OpenRouter accounts use kind openrouter; Muse has no kind of its own)"
             ))
         })?;
         let key = partial.key.clone().unwrap_or_default();
@@ -726,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_kind_error_points_at_openai_compatible_for_openrouter() {
+    fn an_unknown_kind_error_names_all_five_kinds() {
         let err = parse_model_accounts(&vars(&[
             ("BASILEIA_MODEL_MAIN_KEY", CANARY),
             ("BASILEIA_MODEL_MAIN_KIND", "bedrock"),
@@ -735,35 +737,38 @@ mod tests {
         assert!(matches!(err, ConfigError::BadModelAccount(_)));
         assert!(
             err.to_string()
+                .contains("openai_compatible|gemini|claude|ollama|openrouter"),
+            "{err}"
+        );
+        assert!(
+            !err.to_string()
                 .contains("(OpenRouter/Muse use openai_compatible with BASE_URL)"),
             "{err}"
         );
     }
 
     #[test]
-    fn openrouter_muse_account_provisions_with_its_own_base_url_and_model() {
+    fn openrouter_muse_account_provisions_with_its_own_kind_and_default_url() {
         // The model name lives in the TEST only: no model name is ever
-        // defaulted in production code (ADR 0022/0023).
+        // defaulted in production code (ADR 0022/0023). ADR 0027:
+        // `openrouter` is a kind of its own, so no BASE_URL is needed —
+        // the OpenRouter root is the per-kind default.
         let accounts = parse_model_accounts(&vars(&[
             ("BASILEIA_MODEL_MUSE_KEY", "sk-canary-openrouter"),
-            ("BASILEIA_MODEL_MUSE_KIND", "openai_compatible"),
-            (
-                "BASILEIA_MODEL_MUSE_BASE_URL",
-                "https://openrouter.ai/api/v1",
-            ),
+            ("BASILEIA_MODEL_MUSE_KIND", "openrouter"),
             ("BASILEIA_MODEL_MUSE_MODEL", "meta/muse-spark-open"),
         ]))
         .unwrap();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].name, "muse");
-        assert_eq!(accounts[0].kind, ModelKind::OpenAiCompatible);
+        assert_eq!(accounts[0].kind, ModelKind::OpenRouter);
         assert_eq!(accounts[0].base_url, "https://openrouter.ai/api/v1");
         assert_eq!(accounts[0].default_model, "meta/muse-spark-open");
         assert_eq!(accounts[0].key, "sk-canary-openrouter");
     }
 
     #[test]
-    fn default_base_urls_are_the_four_known_roots() {
+    fn default_base_urls_are_the_five_known_roots() {
         assert_eq!(
             default_base_url(ModelKind::OpenAiCompatible),
             "https://api.openai.com/v1"
@@ -779,6 +784,10 @@ mod tests {
         assert_eq!(
             default_base_url(ModelKind::Ollama),
             "http://127.0.0.1:11434"
+        );
+        assert_eq!(
+            default_base_url(ModelKind::OpenRouter),
+            "https://openrouter.ai/api/v1"
         );
     }
 
