@@ -51,12 +51,141 @@ _Avoid_: Dashboard, admin panel, UI
 ## Models
 
 **Provider**:
-A source of LLM completions; an OpenAI-compatible Provider is one reached by base URL, API key and model name (9router, OpenRouter, Groq, LM Studio, vLLM). One Provider may have several accounts.
+A source of LLM completions; an OpenAI-compatible Provider is one reached by base URL, API key and model name (OpenRouter, Groq, LM Studio, vLLM). One Provider may have several accounts.
 _Avoid_: Backend, vendor, model
 
 **Model chain**:
 The ordered list of Provider account and model pairs an Agent uses: the first one normally, the next ones only on an error, a rate limit or a timeout. Set per Role, overridable per Agent.
 _Avoid_: Fallback list, routing table, combo
+
+## Model Auth
+
+**KeySource**:
+Dari mana kunci sebuah Provider berasal saat dipakai: `Fixed` (nilai yang
+dipegang langsung, hanya untuk test dan bootstrap sesaat) atau `Vault`
+(nama secret di Vault, di-resolve tiap call sehingga rotasi langsung
+berlaku tanpa restart).
+_Avoid_: API key, credential
+
+**Vault**:
+Tempat kunci hidup di dalam proses: semua nilai dienkripsi ChaCha20-Poly1305
+dengan satu kunci Vault, hanya nama secret yang terlihat. `Debug`-nya hanya
+menampilkan nama; `redact` mengganti nilai yang dikenal dengan `[redacted]`
+sebelum teks mencapai log, error, atau Briefing.
+_Avoid_: Key store, secret manager
+
+**Sealed vault**:
+Vault yang ditulis ke disk (satu baris di SQLite) sebagai blob terenkripsi
+berversi, agar akun model dari Agora selamat dari restart. Hanya bisa
+dibuka dengan kunci Vault yang sama.
+_Avoid_: Backup kunci, encrypted file
+
+**Kunci Vault**:
+Satu kunci 32-byte yang mengenkripsi seluruh Vault; datang dari env
+(`BASILEIA_VAULT_KEY` atau file 0600), tidak pernah di-log, tidak pernah
+masuk DB, dan dihapus dari memori (di-zeroize) setelah dipakai.
+_Avoid_: Master password, passphrase
+
+**Vault key file**:
+File berisi satu baris base64 kunci Vault, dibaca lewat
+`BASILEIA_VAULT_KEY_FILE`. Ini jalur yang dipilih (ADR 0026): file
+**harus mode 0600** — file yang lebih longgar ditolak saat startup
+sebelum isinya dibaca. `BASILEIA_VAULT_KEY` inline hanya fallback, dibaca
+dulu bila ada dan tidak kosong; bila absen/kosong, barulah file dibaca.
+_Avoid_: Master key file, kunci di disk
+
+**Degraded / locked**:
+Keadaan server saat start tanpa kunci Vault (ADR 0021 §Decision 4):
+server tetap jalan, kunci dari env tetap bekerja, tetapi akun model dari
+Agora yang tersimpan sebagai sealed blob tidak bisa dibuka — Registry
+menandai akun-akun itu `locked` dan Agora menampilkannya apa adanya.
+Unlock hanya lewat restart dengan kunci Vault; kunci master tidak pernah
+dikirim lewat API.
+_Avoid_: Terkunci, mode aman
+
+**Kind**:
+Bentuk API yang dipakai satu akun model — bukan nama vendor dan bukan
+nama model. Hanya empat kind di v1: `openai_compatible` (vendor apa pun
+yang bicara API OpenAI: OpenAI, OpenRouter, Groq, DeepSeek, …),
+`gemini`, `claude`, dan `ollama`. Kind baru hanya ditambahkan bila ada
+bentuk API baru yang tidak tercakup keempatnya (ADR 0022, ADR 0026).
+_Avoid_: Provider type, vendor
+
+**OpenRouter**:
+Gateway yang menjual akses ke banyak model lewat satu API
+OpenAI-compatible. Dijangkau lewat kind `openai_compatible` +
+`BASE_URL=https://openrouter.ai/api/v1` — **bukan** kind sendiri
+(ADR 0026: kind `openrouter` ditunda sebagai ADR masa depan). Health
+check-nya bisa positif palsu: `GET /v1/models` OpenRouter bersifat
+publik dan tidak memvalidasi kunci.
+_Avoid_: Provider Muse, gateway
+
+**Muse**:
+Keluarga model Meta. Dipakai lewat OpenRouter (kind
+`openai_compatible`, `BASE_URL=https://openrouter.ai/api/v1`) dengan
+nama model ditulis eksplisit, mis. `MODEL=meta/muse-spark-open` sebagai
+contoh konfigurasi — bukan default. Tidak ada kind `muse`
+(ADR 0026: ditolak eksplisit — kind adalah bentuk API, bukan nama model).
+_Avoid_: Model Meta, kind Muse
+
+**Ollama**:
+Server model lokal (tanpa kunci) di mesin sendiri. Slot opt-in yang
+dicadangkan untuk nanti (ADR 0026): kind `ollama` sudah ada,
+loopback-only (`http://127.0.0.1:11434`), health check `GET /api/tags`,
+tetapi **tidak aktif sekarang** — model cloud yang dipakai dulu. Client
+Ollama v1 tidak di-guard (penyimpangan yang diterima tertulis, ADR 0022/
+0025); sebagai gantinya URL non-loopback ditolak saat validasi.
+_Avoid_: Model lokal, LLM offline
+
+**Model Registry**:
+Satu-satunya tempat pilihan model hidup: akun model (kind, base URL, model
+default, referensi kunci) dan model chain per Role dengan override per
+Agen. Nama akun dan model bukan rahasia; kunci tidak pernah masuk Registry.
+_Avoid_: Katalog model, routing table
+
+**Akun model**:
+Satu kredensial untuk satu provider: kind (`openai_compatible`, `gemini`,
+`claude`, `ollama`), base URL, model default, dan satu nama secret di Vault.
+Satu provider boleh punya beberapa akun. Model default akun boleh kosong
+bila model ditetapkan per Role di chain — tetapi nama modelnya sendiri
+tidak pernah ditebak: lihat "Nama model eksplisit".
+_Avoid_: Provider account, koneksi
+
+**Nama model eksplisit**:
+Aturan bahwa **nama model tidak pernah punya default** (ADR 0022/0023,
+ADR 0026): tidak ada nama model yang di-hardcode di server, di Registry,
+atau di `default_base_url`. Setiap akun dan setiap entri chain harus
+menuliskan nama model secara eksplisit (`MODEL=…` di env); bila tidak
+ada, resolve gagal dengan error yang jelas, bukan menebak model.
+_Avoid_: Model default, katalog model
+
+**Provisioning**:
+Cara kunci masuk ke server: env var saat startup (bootstrap) atau API Agora
+(admin, tanpa restart). Kunci hanya masuk lewat dua jalan ini — tidak lewat
+Skill, Job, atau jawaban model.
+_Avoid_: Setup kunci, import kunci
+
+**Health check**:
+Tes on-demand bahwa satu akun model benar-benar bisa dipakai: memanggil
+endpoint daftar model provider (`GET /v1/models` atau setaranya) lewat
+guarded client, tanpa memanggil inference. Hasilnya status, bukan janji.
+Status 402 (akun kehabisan kredit) dilaporkan tersendiri sebagai
+`payment_required` — bukan `unreachable`: jaringannya baik, saldonya yang
+habis.
+_Avoid_: Ping, tes koneksi
+
+**Rotasi**:
+Mengganti nilai kunci sebuah akun dengan kunci baru (di vendor dulu, lalu
+di Agora), tanpa restart: call berikutnya memakai kunci baru. Satu nama,
+satu nilai — tidak ada masa tenggang dua kunci aktif.
+_Avoid_: Ganti kunci, refresh kunci
+
+**Revoke**:
+Mencabut pemakaian kunci di server (hapus dari Vault + tandai akun
+dicabut) sehingga call baru gagal dengan error yang jelas. Revoke di server
+tidak mematikan kunci di sisi vendor — itu tetap harus dilakukan operator
+di dashboard provider.
+_Avoid_: Hapus kunci, nonaktifkan kunci
 
 ## Orchestration
 

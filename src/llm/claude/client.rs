@@ -82,6 +82,11 @@ pub struct Claude {
     api_key: String,
     anthropic_version: String,
     base_url: String,
+    /// HTTP client for requests, when injected (ADR 0025): production
+    /// passes the guarded client. When unset, requests use a fresh
+    /// `reqwest::Client::new()` as before — the fallback only keeps the old
+    /// constructors working; the production path always injects.
+    http_client: Option<Client>,
 }
 
 impl Default for Claude {
@@ -98,7 +103,15 @@ impl Claude {
             api_key: std::env::var("CLAUDE_API_KEY").unwrap_or_default(),
             anthropic_version: "2023-06-01".to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
+            http_client: None,
         }
+    }
+
+    /// Uses `client` for every request instead of a fresh client per
+    /// request (ADR 0025: production passes the guarded client).
+    pub fn with_http_client(mut self, client: Client) -> Self {
+        self.http_client = Some(client);
+        self
     }
 
     pub fn with_model<S: Into<String>>(mut self, model: S) -> Self {
@@ -128,7 +141,8 @@ impl Claude {
     }
 
     async fn send(&self, payload: &Payload) -> Result<reqwest::Response, LLMError> {
-        let res = Client::new()
+        let client = self.http_client.clone().unwrap_or_else(Client::new);
+        let res = client
             .post(format!("{}/v1/messages", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", &self.anthropic_version)

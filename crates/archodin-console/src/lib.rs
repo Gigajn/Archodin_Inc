@@ -34,7 +34,7 @@
 //! ```rust
 //! # use archodin_console::{Agora, Auth, hash_password};
 //! # use archodin_graph::Vault;
-//! # let vault = Vault::new([0; 32]);
+//! # let vault = Vault::new([0; 32].into());
 //! # vault.put("agora/username", "kudo");
 //! # vault.put("agora/password_hash", &hash_password("pw"));
 //! # let auth = Auth::from_vault(&vault, "agora/username", "agora/password_hash").unwrap();
@@ -49,9 +49,11 @@
 //! [`notify_window`](AgoraBuilder::notify_window) share one message.
 
 mod auth;
+mod model_api;
 mod notify;
 
 pub use auth::{hash_password, Auth, AuthError};
+pub use model_api::ModelApi;
 pub use notify::{EmailNotifier, Mailer, Notification, Notifier, NotifyError, TelegramNotifier};
 
 use std::collections::{BTreeMap, HashMap};
@@ -60,16 +62,16 @@ use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use archodin_graph::locks::mutex;
 use archodin_graph::{
     ApprovalDecision, ApprovalRequest, Approver, JobEvent, JobOrigin, JobQueue, McpLibrary,
     SkillLibrary, Usage, UsageMeter,
 };
-use archodin_graph::locks::mutex;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{Html, IntoResponse, Json, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use futures::future::BoxFuture;
 use futures::stream::{self, Stream, StreamExt};
@@ -330,6 +332,7 @@ struct Inner {
     agents: Vec<String>,
     max_running: usize,
     auth: Option<Auth>,
+    model_api: Option<ModelApi>,
     max_jobs: usize,
     max_approvals: usize,
     max_events_per_job: usize,
@@ -363,6 +366,7 @@ pub struct AgoraBuilder {
     max_running: usize,
     auth: Option<Auth>,
     insecure_no_auth: bool,
+    model_api: Option<ModelApi>,
     max_jobs: usize,
     max_approvals: usize,
     max_events_per_job: usize,
@@ -422,6 +426,17 @@ impl AgoraBuilder {
     /// [`Agora::router`].
     pub fn auth(mut self, auth: Auth) -> Self {
         self.auth = Some(auth);
+        self
+    }
+
+    /// Attaches the model API (ADR 0020 §Decision 3, ADR 0024): the
+    /// `/api/models/*` routes (accounts, rotate, health, audit, status,
+    /// budget). Without this the routes answer 503 and the Agora works
+    /// as before. The routes live inside [`Agora::router`], so the login
+    /// from [`.auth()`](Self::auth) protects them exactly like every
+    /// other route — this setter adds no auth of its own.
+    pub fn model_api(mut self, api: ModelApi) -> Self {
+        self.model_api = Some(api);
         self
     }
 
@@ -520,6 +535,7 @@ impl AgoraBuilder {
                 agents: self.agents,
                 max_running: self.max_running,
                 auth: self.auth,
+                model_api: self.model_api,
                 max_jobs: self.max_jobs,
                 max_approvals: self.max_approvals,
                 max_events_per_job: self.max_events_per_job,
@@ -595,6 +611,7 @@ impl Agora {
             max_running: 4,
             auth: None,
             insecure_no_auth: false,
+            model_api: None,
             max_jobs: DEFAULT_MAX_JOBS,
             max_approvals: DEFAULT_MAX_APPROVALS,
             max_events_per_job: DEFAULT_MAX_EVENTS_PER_JOB,
@@ -956,6 +973,34 @@ impl Agora {
             .route("/api/roles/{role}/approve-all", post(approve_role))
             .route("/api/roles/{role}/reject-all", post(reject_role))
             .route("/api/usage", get(usage))
+            // The model API (ADR 0020 §Decision 3, ADR 0024): provision,
+            // rotate, revoke, health-check, audit and Budget per account.
+            // Registered here, inside the router `auth.protect` wraps, so
+            // the admin login protects them exactly like every other
+            // route. Handlers live in `model_api.rs`; without a
+            // `ModelApi` attached they answer 503.
+            .route(
+                "/api/models/accounts",
+                get(model_api::list_accounts).post(model_api::create_account),
+            )
+            .route(
+                "/api/models/accounts/{name}",
+                delete(model_api::delete_account),
+            )
+            .route(
+                "/api/models/accounts/{name}/rotate",
+                post(model_api::rotate_account),
+            )
+            .route(
+                "/api/models/accounts/{name}/health",
+                post(model_api::health_account),
+            )
+            .route(
+                "/api/models/accounts/{name}/budget",
+                get(model_api::get_budget).put(model_api::set_budget),
+            )
+            .route("/api/models/audit", get(model_api::list_audit))
+            .route("/api/models/status", get(model_api::model_status))
             .with_state(self.clone());
         match &self.inner.auth {
             Some(auth) => auth.protect(router),
@@ -966,6 +1011,13 @@ impl Agora {
     /// The last reason a notification failed to send, if any did.
     pub fn last_notification_error(&self) -> Option<String> {
         mutex(&self.inner.notes).last_error.clone()
+    }
+
+    /// The attached model API, if the application wired one with
+    /// [`AgoraBuilder::model_api`]. The `/api/models/*` handlers read
+    /// this; without it they answer 503.
+    pub(crate) fn model_api(&self) -> Option<ModelApi> {
+        self.inner.model_api.clone()
     }
 
     /// Asks the Skill and MCP libraries about everything pending, so new ones are
@@ -1265,5 +1317,3 @@ async fn usage(State(agora): State<Agora>) -> Json<Value> {
         .collect();
     Json(json!({"agents": agents, "jobs": jobs}))
 }
-
-

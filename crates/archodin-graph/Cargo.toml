@@ -11,6 +11,11 @@ langchain-rust = { path = "../.." }
 futures = "0.3.31"
 tokio = { version = "1", features = ["time", "rt", "process", "io-util", "sync"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "stream"] }
+# reqwest 0.12 ONLY for Ollama (B3): ollama-rs 0.3.6 is built on reqwest
+# 0.12, so the guarded 0.13 client cannot be injected (ADR 0025 §3) and
+# the timeout must be set on a 0.12 client built here. Same features
+# ollama-rs itself enables (json + stream); loopback-only, no TLS needed.
+reqwest012 = { package = "reqwest", version = "0.12", default-features = false, features = ["json", "stream"] }
 # SSRF filtering at resolve time (ADR 0010): http-acl supplies the ACL and
 # the filtering DNS resolver wired into `http_guard::shared_client()`.
 # Both crates declare reqwest with default-features = false and no TLS

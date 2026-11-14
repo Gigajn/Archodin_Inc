@@ -24,6 +24,8 @@ fn test_config() -> Config {
         db: DbConfig::Memory,
         admin_user: "admin".to_string(),
         admin_password: "test-password-change-me".to_string(),
+        vault_key: None,
+        model_accounts: Vec::new(),
     }
 }
 

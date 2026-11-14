@@ -62,6 +62,11 @@ pub struct OpenAI<C: Config> {
     config: C,
     options: CallOptions,
     model: String,
+    /// HTTP client for requests, when injected (ADR 0025): production
+    /// passes the guarded client. When unset, a fresh client is built from
+    /// the config as before — the fallback only keeps the old constructors
+    /// working; the production path always injects.
+    http_client: Option<reqwest::Client>,
 }
 
 /// `provider` field of the `llm.generate` span. OpenAI-compatible servers report as "openai".
@@ -73,7 +78,15 @@ impl<C: Config> OpenAI<C> {
             config,
             options: CallOptions::default(),
             model: OpenAIModel::Gpt4oMini.to_string(),
+            http_client: None,
         }
+    }
+
+    /// Uses `client` for every request instead of a client built fresh from
+    /// the config (ADR 0025: production passes the guarded client).
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http_client = Some(client);
+        self
     }
 
     pub fn with_model<S: Into<String>>(mut self, model: S) -> Self {
@@ -99,8 +112,19 @@ impl Default for OpenAI<OpenAIConfig> {
 }
 
 impl<C: Config + Clone + Send + Sync + 'static> OpenAI<C> {
+    /// The async-openai client for one call: built on the injected HTTP
+    /// client when one was set (`Client::build`, async-openai 0.42
+    /// `src/client.rs:130`), otherwise built from the config as before
+    /// (`Client::with_config`, which builds a fresh `reqwest::Client`).
+    fn client(&self) -> Client<C> {
+        match &self.http_client {
+            Some(http_client) => Client::build(http_client.clone(), self.config.clone()),
+            None => Client::with_config(self.config.clone()),
+        }
+    }
+
     async fn generate_untraced(&self, prompt: &[Message]) -> Result<GenerateResult, LLMError> {
-        let client = Client::with_config(self.config.clone());
+        let client = self.client();
         let request = self.generate_request(prompt, self.options.streaming_func.is_some())?;
         match &self.options.streaming_func {
             Some(func) => {
@@ -190,7 +214,7 @@ impl<C: Config + Clone + Send + Sync + 'static> LLM for OpenAI<C> {
         &self,
         messages: &[Message],
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamData, LLMError>> + Send>>, LLMError> {
-        let client = Client::with_config(self.config.clone());
+        let client = self.client();
         let request = self.generate_request(messages, true)?;
 
         let original_stream = client.chat().create_stream(request).await?;
@@ -228,7 +252,7 @@ impl<C: Config + Clone + Send + Sync + 'static> LLM for OpenAI<C> {
 
     fn generate_stream<'a>(&'a self, messages: &'a [Message]) -> LLMEventStream<'a> {
         let events = box_llm_events(async_stream::try_stream! {
-            let client = Client::with_config(self.config.clone());
+            let client = self.client();
             let request = self.generate_request(messages, true)?;
             let mut stream = client.chat().create_stream(request).await?;
 

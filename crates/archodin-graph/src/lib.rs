@@ -72,6 +72,15 @@ mod native;
 pub use agent::{AgentError, AgentNode, AgentTool, Provider, TypedTool};
 pub use chain::{ChainEvent, FallbackReason, ModelChain, ModelPair};
 pub use gemini::Gemini;
+mod registry;
+pub use registry::{ModelAccount, ModelError, ModelKind, Registry};
+
+mod model_ops;
+pub use model_ops::{
+    health_check, health_url, validate_account_name, validate_budget, validate_provision,
+    validate_rotation_key, AuditAction, AuditEvent, HealthOutcome, HealthStatus, ModelBudgets,
+    ProvisionInput, ValidatedProvision, AUDIT_ACTOR, AUDIT_LIST_LIMIT, NO_VAULT_KEY_REASON,
+};
 
 mod strategos;
 pub use strategos::{Assignment, Piece, Strategos, StrategosError, StrategosEvent};
@@ -493,6 +502,7 @@ pub use sandbox::{
     SandboxPolicy, SandboxTool, ScriptedSandbox, SkillScriptError,
 };
 mod http_guard;
+pub use http_guard::{shared_client, HttpGuardError};
 mod mcp;
 pub use mcp::{McpClient, McpError, McpLibrary, McpServer, PendingMcpServer};
 mod ronin;

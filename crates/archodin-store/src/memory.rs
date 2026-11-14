@@ -10,7 +10,11 @@ use futures::future::BoxFuture;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::{tidy_fact, AgentRecord, AkashaStore, RoleRecord, RosterStore, SkillStore, StoreError};
+use crate::{
+    sealed_envelope_version, tidy_fact, AgentRecord, AkashaStore, ModelAccountRecord,
+    ModelAccountStore, ModelAuditRecord, ModelAuditStore, RoleRecord, RosterStore,
+    SealedVaultStore, SkillStore, StoreError,
+};
 
 #[derive(Default)]
 struct Inner {
@@ -20,6 +24,14 @@ struct Inner {
     agents: Vec<AgentRecord>,
     skills: SkillSnapshot,
     facts: BTreeMap<String, Vec<String>>,
+    /// The sealed vault envelope, with the `version` from its JSON, if saved.
+    sealed_vault: Option<(i64, Vec<u8>)>,
+    /// Model-account metadata by name (NON-secret only; see
+    /// [`ModelAccountRecord`]).
+    model_accounts: BTreeMap<String, ModelAccountRecord>,
+    /// The append-only audit log (ADR 0024), oldest first; `list_audit`
+    /// reverses it. `seq` is assigned here, in insertion order.
+    model_audit: Vec<ModelAuditRecord>,
 }
 
 /// Everything a company keeps, in memory. Cloning gives another handle to the
@@ -155,3 +167,64 @@ impl AkashaStore for MemoryStore {
     }
 }
 
+#[async_trait]
+impl SealedVaultStore for MemoryStore {
+    async fn save_sealed_vault(&self, envelope: &[u8]) -> Result<(), StoreError> {
+        let version = sealed_envelope_version(envelope)?;
+        mutex(&self.inner).sealed_vault = Some((version, envelope.to_vec()));
+        Ok(())
+    }
+
+    async fn load_sealed_vault(&self) -> Result<Option<Vec<u8>>, StoreError> {
+        Ok(mutex(&self.inner)
+            .sealed_vault
+            .clone()
+            .map(|(_, bytes)| bytes))
+    }
+}
+
+#[async_trait]
+impl ModelAccountStore for MemoryStore {
+    async fn save_model_account(&self, account: &ModelAccountRecord) -> Result<(), StoreError> {
+        mutex(&self.inner)
+            .model_accounts
+            .insert(account.name.clone(), account.clone());
+        Ok(())
+    }
+
+    async fn load_model_accounts(&self) -> Result<Vec<ModelAccountRecord>, StoreError> {
+        Ok(mutex(&self.inner)
+            .model_accounts
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    async fn remove_model_account(&self, name: &str) -> Result<(), StoreError> {
+        mutex(&self.inner).model_accounts.remove(name);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ModelAuditStore for MemoryStore {
+    async fn record_audit(&self, record: &ModelAuditRecord) -> Result<(), StoreError> {
+        let mut inner = mutex(&self.inner);
+        let seq = inner.model_audit.len() as i64 + 1;
+        let mut stored = record.clone();
+        stored.seq = seq;
+        inner.model_audit.push(stored);
+        Ok(())
+    }
+
+    async fn list_audit(&self, limit: usize) -> Result<Vec<ModelAuditRecord>, StoreError> {
+        let inner = mutex(&self.inner);
+        Ok(inner
+            .model_audit
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+}
